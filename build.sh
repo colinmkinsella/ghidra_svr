@@ -15,7 +15,7 @@
 #
 # Environment variables (override defaults):
 #   Qt6_DIR     Path to Qt6 CMake dir  (default: /usr/lib/cmake/Qt6)
-#   BN_INSTALL  Path to BN install dir (default: /opt/Vector35/BinaryNinja)
+#   BN_INSTALL  Path to BN install dir (default: platform-specific — see below)
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,8 +23,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---------------------------------------------------------------------------
 # Configuration — adjust paths here if your environment differs
 # ---------------------------------------------------------------------------
-Qt6_DIR="${Qt6_DIR:-/usr/lib/cmake/Qt6}"
-BN_INSTALL="${BN_INSTALL:-/opt/Vector35/BinaryNinja}"
+if [[ "$(uname)" == "Darwin" ]]; then
+    BN_INSTALL="${BN_INSTALL:-/Applications/Binary Ninja.app/Contents/MacOS}"
+    # Auto-detect Qt6 from the Qt installer if Qt6_DIR is not explicitly set.
+    if [[ -z "${Qt6_DIR:-}" ]]; then
+        _QMAKE=$(find /usr/local/Qt* -name "qmake" -maxdepth 5 2>/dev/null | head -1)
+        if [[ -n "$_QMAKE" ]]; then
+            Qt6_DIR="$("$_QMAKE" -query QT_INSTALL_LIBS 2>/dev/null)/cmake/Qt6"
+            export PATH="$(dirname "$_QMAKE"):$PATH"
+        fi
+    else
+        # Qt6_DIR is explicit — still add qmake to PATH for FindBinaryNinjaUI.
+        _QT_BIN="$(cd "$Qt6_DIR/../../.." 2>/dev/null && pwd)/bin"
+        [[ -f "$_QT_BIN/qmake" ]] && export PATH="$_QT_BIN:$PATH"
+    fi
+    Qt6_DIR="${Qt6_DIR:-/usr/lib/cmake/Qt6}"
+else
+    BN_INSTALL="${BN_INSTALL:-/opt/Vector35/BinaryNinja}"
+    Qt6_DIR="${Qt6_DIR:-/usr/lib/cmake/Qt6}"
+fi
 
 BRIDGE_DIR="$SCRIPT_DIR/bridge"
 PLUGIN_DIR="$SCRIPT_DIR/plugin"
@@ -69,6 +86,14 @@ fi
 # Build Java bridge
 # ---------------------------------------------------------------------------
 if [[ $DO_BRIDGE -eq 1 ]]; then
+    if ! java -version > /dev/null 2>&1; then
+        echo
+        echo "WARNING: Java not found — skipping bridge JAR build."
+        echo "         Install JDK 17+ (e.g. Eclipse Adoptium) and re-run to build the bridge."
+        DO_BRIDGE=0
+    fi
+fi
+if [[ $DO_BRIDGE -eq 1 ]]; then
     echo
     echo "====== Building Java bridge ======"
     pushd "$BRIDGE_DIR" > /dev/null
@@ -102,7 +127,11 @@ if [[ $DO_PLUGIN -eq 1 ]]; then
         echo "ERROR: Plugin build failed."
         exit 1
     fi
-    echo "Plugin: $PLUGIN_BUILD/libbinja-ghidra.so"
+    if [[ "$(uname)" == "Darwin" ]]; then
+        echo "Plugin: $PLUGIN_BUILD/libbinja-ghidra.dylib"
+    else
+        echo "Plugin: $PLUGIN_BUILD/libbinja-ghidra.so"
+    fi
 fi
 
 # ---------------------------------------------------------------------------

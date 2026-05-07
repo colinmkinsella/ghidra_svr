@@ -218,6 +218,7 @@ bool BridgeProcess::isRunning() const {
 // ============================================================================
 // POSIX implementation (Linux / macOS)
 // ============================================================================
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
@@ -245,25 +246,32 @@ bool BridgeProcess::start(const std::string& javaExe,
                            std::string& errorOut) {
     stop();
 
-    int pipefd[2];
+    int pipefd[2]; // stdout — carries the READY handshake line
+    int errfd[2];  // stderr — bridge diagnostic output
     if (pipe(pipefd) != 0) {
         errorOut = std::string("pipe() failed: ") + strerror(errno);
+        return false;
+    }
+    if (pipe(errfd) != 0) {
+        errorOut = std::string("pipe(stderr) failed: ") + strerror(errno);
+        close(pipefd[0]); close(pipefd[1]);
         return false;
     }
 
     pid_t pid = fork();
     if (pid < 0) {
         errorOut = std::string("fork() failed: ") + strerror(errno);
-        close(pipefd[0]);
-        close(pipefd[1]);
+        close(pipefd[0]); close(pipefd[1]);
+        close(errfd[0]);  close(errfd[1]);
         return false;
     }
 
     if (pid == 0) {
-        // Child: redirect stdout to write end of pipe.
+        // Child: redirect stdout and stderr into the parent pipes.
         dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[0]);
-        close(pipefd[1]);
+        dup2(errfd[1],  STDERR_FILENO);
+        close(pipefd[0]); close(pipefd[1]);
+        close(errfd[0]);  close(errfd[1]);
 
         std::string exe = javaExe.empty() ? "java" : javaExe;
         std::string cp  = buildClasspath(bridgeJar, ghidraHome);
@@ -281,16 +289,43 @@ bool BridgeProcess::start(const std::string& javaExe,
         _exit(127); // execvp failed
     }
 
-    // Parent: close write end.
+    // Parent: close write ends.
     close(pipefd[1]);
-    m_pid    = pid;
-    m_pipeFd = pipefd[0];
+    close(errfd[1]);
+    m_pid      = pid;
+    m_pipeFd   = pipefd[0];
+    m_stderrFd = errfd[0];
 
     if (!readReadyLine(errorOut)) {
         stop();
         return false;
     }
+    startStderrLogger();
     return true;
+}
+
+void BridgeProcess::startStderrLogger() {
+    if (m_stderrFd < 0) return;
+    int fd = m_stderrFd;
+    m_stderrThread = std::thread([fd]() {
+        char buf[4096];
+        std::string line;
+        ssize_t n;
+        while ((n = read(fd, buf, sizeof(buf))) > 0) {
+            for (ssize_t i = 0; i < n; ++i) {
+                if (buf[i] == '\n') {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    if (!line.empty())
+                        BinaryNinja::LogInfo("bridge: %s", line.c_str());
+                    line.clear();
+                } else {
+                    line += buf[i];
+                }
+            }
+        }
+        if (!line.empty())
+            BinaryNinja::LogInfo("bridge: %s", line.c_str());
+    });
 }
 
 bool BridgeProcess::readReadyLine(std::string& errorOut) {
@@ -317,14 +352,24 @@ bool BridgeProcess::readReadyLine(std::string& errorOut) {
 }
 
 void BridgeProcess::stop() {
-    if (m_pid > 0) {
+    if (m_pid > 0)
         kill(m_pid, SIGTERM);
-        waitpid(m_pid, nullptr, 0);
-        m_pid = -1;
+
+    // Close stderr read-end first — unblocks the logger thread's read().
+    if (m_stderrFd >= 0) {
+        close(m_stderrFd);
+        m_stderrFd = -1;
     }
+    if (m_stderrThread.joinable())
+        m_stderrThread.join();
+
     if (m_pipeFd >= 0) {
         close(m_pipeFd);
         m_pipeFd = -1;
+    }
+    if (m_pid > 0) {
+        waitpid(m_pid, nullptr, 0);
+        m_pid = -1;
     }
     m_port = -1;
 }

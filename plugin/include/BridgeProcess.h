@@ -4,6 +4,9 @@
 
 #ifdef _WIN32
 #  include <windows.h>
+#else
+#  include <sys/types.h>
+#  include <thread>
 #endif
 
 /**
@@ -15,8 +18,7 @@
  *   3. Read bridge stdout line-by-line until "READY port=<N>" is received.
  *   4. Store the bound port; the C++ plugin then connects on localhost:<N>.
  *
- * Bridge stderr is inherited by the parent process so log messages appear
- * in BN's log window (on Windows) or the terminal (on Linux/macOS).
+ * Bridge stderr is captured and forwarded to BN's log on all platforms.
  */
 class BridgeProcess {
 public:
@@ -65,10 +67,13 @@ private:
     static std::string buildClasspath(const std::string& bridgeJar,
                                       const std::string& ghidraHome);
 #else
-    pid_t m_pid    = -1;
-    int   m_pipeFd = -1;
+    pid_t       m_pid          = -1;
+    int         m_pipeFd       = -1;
+    int         m_stderrFd     = -1;
+    std::thread m_stderrThread;
 
     bool readReadyLine(std::string& errorOut);
+    void startStderrLogger();
     static std::string buildClasspath(const std::string& bridgeJar,
                                       const std::string& ghidraHome);
 #endif

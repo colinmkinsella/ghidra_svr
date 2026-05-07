@@ -27,7 +27,13 @@ set_target_properties(Qt6::Core Qt6::Widgets PROPERTIES
 # ---------------------------------------------------------------------------
 include(FetchContent)
 
-file(READ "${BN_INSTALL_DIR}/api_REVISION.txt" _bn_rev_raw)
+# On macOS the app bundle keeps api_REVISION.txt under Contents/Resources/,
+# while BN_INSTALL_DIR points at Contents/MacOS/ (where the dylibs live).
+if(APPLE)
+    file(READ "${BN_INSTALL_DIR}/../Resources/api_REVISION.txt" _bn_rev_raw)
+else()
+    file(READ "${BN_INSTALL_DIR}/api_REVISION.txt" _bn_rev_raw)
+endif()
 # Split into lines, drop blanks, take the last one (the bare SHA-1).
 string(REGEX MATCHALL "[^\r\n]+" _rev_lines "${_bn_rev_raw}")
 list(FILTER _rev_lines EXCLUDE REGEX "^$")
@@ -81,6 +87,8 @@ target_link_libraries(binja-ghidra PRIVATE
 if(WIN32)
     target_link_libraries(binja-ghidra PRIVATE ws2_32)
     set_target_properties(binja-ghidra PROPERTIES PREFIX "")
+elseif(UNIX AND NOT APPLE)
+    target_link_libraries(binja-ghidra PRIVATE dl)
 endif()
 
 target_compile_definitions(binja-ghidra PRIVATE

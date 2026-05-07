@@ -2,6 +2,8 @@
 #include <binaryninjaapi.h>
 #ifdef _WIN32
 #  include <windows.h>
+#else
+#  include <dlfcn.h>
 #endif
 
 // ---------------------------------------------------------------------------
@@ -48,6 +50,14 @@ static std::string autoDetectBridgeJar() {
     size_t slash = path.find_last_of("/\\");
     if (slash != std::string::npos)
         return path.substr(0, slash + 1) + "ghidra-bridge-0.1.0.jar";
+#else
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&GhidraConnection::instance), &info) && info.dli_fname) {
+        std::string path = info.dli_fname;
+        size_t slash = path.find_last_of('/');
+        if (slash != std::string::npos)
+            return path.substr(0, slash + 1) + "ghidra-bridge-0.1.0.jar";
+    }
 #endif
     return {};
 }
