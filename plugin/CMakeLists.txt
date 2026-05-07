@@ -29,9 +29,29 @@ if(GHIDRA_HOME AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../bridge/gradle.prop
 endif()
 
 # ---------------------------------------------------------------------------
-# Qt6 — find before FetchContent so FindBinaryNinjaUI picks up the cached result
+# Qt6 — find before FetchContent so FindBinaryNinjaUI picks up the cached result.
+# FetchQtBuild clones Vector35/qt-build and registers a `build-qt` target for
+# machines that don't have Qt installed yet.  It also sets Qt6_DIR to point at
+# <repo-root>/qt/ if a previous build-qt run installed Qt there.
 # ---------------------------------------------------------------------------
-find_package(Qt6 REQUIRED COMPONENTS Widgets Core)
+include(FetchQtBuild)
+
+find_package(Qt6 QUIET COMPONENTS Widgets Core)
+if(NOT Qt6_FOUND)
+    # build-qt was added by FetchQtBuild above and is usable even if we stop here.
+    # Using return() (not FATAL_ERROR) so the target makes it into the build files.
+    if(TARGET build-qt)
+        message(STATUS "")
+        message(STATUS "Qt6 not found — plugin cannot be built yet.")
+        message(STATUS "Step 1:  cmake --build plugin/build --target build-qt   (~1-2 hours)")
+        message(STATUS "Step 2:  cmake -B plugin/build -S plugin                (re-configure)")
+        message(STATUS "Step 3:  cmake --build plugin/build                     (build plugin)")
+        message(STATUS "")
+    else()
+        message(FATAL_ERROR "Qt6 not found. Install Qt6 or pass -DQt6_DIR=<path>.")
+    endif()
+    return()
+endif()
 set_target_properties(Qt6::Core Qt6::Widgets PROPERTIES
     MAP_IMPORTED_CONFIG_RELWITHDEBINFO RELEASE
     MAP_IMPORTED_CONFIG_MINSIZEREL     RELEASE

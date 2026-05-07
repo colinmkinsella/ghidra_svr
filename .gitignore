@@ -11,6 +11,10 @@ bridge/gradle/wrapper/gradle-wrapper.jar
 # Ghidra — downloaded at CMake configure time by FetchGhidra.cmake
 ghidra/
 
+# Qt — cloned build scripts and compiled output (FetchQtBuild.cmake)
+qt-build/
+qt/
+
 # Local environment — each developer sets their own Ghidra path
 bridge/gradle.properties
 
