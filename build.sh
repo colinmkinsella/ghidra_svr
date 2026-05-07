@@ -145,7 +145,11 @@ if [[ $DO_INSTALL -eq 1 ]]; then
         echo "ERROR: Install failed."
         exit 1
     fi
-    echo "Installed to: ~/.binaryninja/plugins/"
+    if [[ "$(uname)" == "Darwin" ]]; then
+        echo "Installed to: ~/Library/Application Support/Binary Ninja/plugins/"
+    else
+        echo "Installed to: ~/.binaryninja/plugins/"
+    fi
 fi
 
 echo
