@@ -6,7 +6,6 @@ plugin/*.log
 
 # Gradle
 bridge/.gradle/
-bridge/gradle/wrapper/gradle-wrapper.jar
 
 # Ghidra — downloaded at CMake configure time by FetchGhidra.cmake
 ghidra/
