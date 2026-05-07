@@ -1,0 +1,100 @@
+cmake_minimum_required(VERSION 3.24)
+project(binja-ghidra CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC OFF)
+set(CMAKE_AUTORCC OFF)
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+set(BN_INSTALL_DIR "C:/Program Files/Vector35/BinaryNinja"
+    CACHE PATH "Binary Ninja installation directory")
+
+# ---------------------------------------------------------------------------
+# Qt6 — find before FetchContent so FindBinaryNinjaUI picks up the cached result
+# ---------------------------------------------------------------------------
+find_package(Qt6 REQUIRED COMPONENTS Widgets Core)
+set_target_properties(Qt6::Core Qt6::Widgets PROPERTIES
+    MAP_IMPORTED_CONFIG_RELWITHDEBINFO RELEASE
+    MAP_IMPORTED_CONFIG_MINSIZEREL     RELEASE
+)
+
+# ---------------------------------------------------------------------------
+# Binary Ninja API — auto-fetch the exact commit matching the BN install
+# ---------------------------------------------------------------------------
+include(FetchContent)
+
+file(READ "${BN_INSTALL_DIR}/api_REVISION.txt" _bn_rev_raw)
+# Split into lines, drop blanks, take the last one (the bare SHA-1).
+string(REGEX MATCHALL "[^\r\n]+" _rev_lines "${_bn_rev_raw}")
+list(FILTER _rev_lines EXCLUDE REGEX "^$")
+list(GET _rev_lines -1 BN_API_COMMIT)
+string(STRIP "${BN_API_COMMIT}" BN_API_COMMIT)
+if(NOT BN_API_COMMIT MATCHES "^[0-9a-f]+$")
+    message(FATAL_ERROR
+        "Could not parse API commit from ${BN_INSTALL_DIR}/api_REVISION.txt\n"
+        "Got: '${BN_API_COMMIT}'")
+endif()
+message(STATUS "Binary Ninja API commit: ${BN_API_COMMIT}")
+
+FetchContent_Declare(binaryninja-api
+    GIT_REPOSITORY https://github.com/Vector35/binaryninja-api.git
+    GIT_TAG        ${BN_API_COMMIT}
+    GIT_SHALLOW    TRUE
+    GIT_SUBMODULES "vendor/fmt"
+    SOURCE_DIR     "${CMAKE_SOURCE_DIR}/../binaryninja-api"
+    SUBBUILD_DIR   "${CMAKE_BINARY_DIR}/_deps/binaryninja-api-subbuild"
+)
+FetchContent_MakeAvailable(binaryninja-api)
+
+
+# ---------------------------------------------------------------------------
+# Plugin target
+# ---------------------------------------------------------------------------
+add_library(binja-ghidra SHARED
+    src/plugin.cpp
+    src/BridgeProcess.cpp
+    src/BridgeClient.cpp
+    src/GhidraConnection.cpp
+    src/SyncEngine.cpp
+    src/ui/ConnectDialog.cpp
+    src/ui/ProjectPanel.cpp
+    # Headers with Q_OBJECT must be listed so AUTOMOC finds them.
+    include/ui/ConnectDialog.h
+    include/ui/ProjectPanel.h
+)
+
+target_include_directories(binja-ghidra PRIVATE
+    include
+    "${CMAKE_SOURCE_DIR}/../binaryninja-api/vendor"   # nlohmann/json.hpp
+)
+
+target_link_libraries(binja-ghidra PRIVATE
+    binaryninjaui          # transitively pulls in binaryninjaapi + BN link dirs
+    Qt6::Widgets
+    Qt6::Core
+)
+
+if(WIN32)
+    target_link_libraries(binja-ghidra PRIVATE ws2_32)
+    set_target_properties(binja-ghidra PROPERTIES PREFIX "")
+endif()
+
+target_compile_definitions(binja-ghidra PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+    _CRT_SECURE_NO_WARNINGS
+)
+
+# ---------------------------------------------------------------------------
+# Install — uses bn_install_plugin() helper defined by the api
+# ---------------------------------------------------------------------------
+bn_install_plugin(binja-ghidra)
+install(FILES
+    "${CMAKE_SOURCE_DIR}/../bridge/build/libs/ghidra-bridge-0.1.0.jar"
+    DESTINATION "${BN_USER_PLUGINS_DIR}"
+    OPTIONAL
+)

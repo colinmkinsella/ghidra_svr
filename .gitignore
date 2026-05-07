@@ -1,0 +1,19 @@
+# Build outputs
+bridge/build/
+bridge/bin/
+plugin/build/
+plugin/*.log
+
+# Gradle
+bridge/.gradle/
+bridge/gradle/wrapper/gradle-wrapper.jar
+
+# Local environment — each developer sets their own Ghidra path
+bridge/gradle.properties
+
+# Claude Code settings
+.claude/
+
+# Windows
+Thumbs.db
+Desktop.ini

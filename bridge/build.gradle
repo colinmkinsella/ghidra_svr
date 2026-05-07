@@ -1,0 +1,38 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow' version '8.3.6'
+}
+
+group = 'com.ghidra_svr'
+version = '0.1.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+}
+
+// Ghidra JARs are provided at runtime via classpath; we only need them to compile against.
+// Point ghidraHome at your Ghidra installation directory in gradle.properties.
+def ghidraJars = fileTree(dir: "${ghidraHome}/Ghidra/Framework", include: '**/lib/*.jar')
+
+dependencies {
+    implementation 'com.google.code.gson:gson:2.10.1'
+    compileOnly ghidraJars
+}
+
+shadowJar {
+    archiveBaseName = 'ghidra-bridge'
+    archiveClassifier = ''
+    archiveVersion = project.version
+    manifest {
+        attributes 'Main-Class': 'com.ghidra_svr.bridge.BridgeMain'
+    }
+    // GSON bundled without relocation — Ghidra 12 ships its own GSON at a compatible
+    // version so a classpath clash is unlikely; revisit if runtime errors appear.
+}
+
+build.dependsOn shadowJar
