@@ -6,10 +6,20 @@ A Binary Ninja plugin that connects to a Ghidra Server repository and imports it
 
 Ghidra and Binary Ninja each have strengths. This plugin lets you use both on the same binary without manually copying names or comments between them. Connect to a running Ghidra Server, browse its repositories, and double-click any project file to pull its analysis into the currently open BN view.
 
-**Imported data:**
-- Function names and labels (user-defined, imported, and analysis-generated)
-- EOL, pre, post, plate, and repeatable comments
-- Function attributes: thunk, no-return, and inline flags (applied as BN tags)
+**Sync goes both directions.**
+
+| | BN ← Ghidra (import) | BN → Ghidra (checkin) |
+|---|---|---|
+| Symbols (labels, function names) | ✓ | ✓ |
+| Comments (EOL/PRE/POST/PLATE/REP) | ✓ | ✓ |
+| Function signatures (return type, calling convention) | ✓ | ✓ |
+| Function parameters (rename, retype, add) | ✓ | ✓ |
+| Data types (struct/union/enum/typedef + pointer/array) | ✓ | ✓ |
+| Equates (constant names + references) | ✓ | ✓ |
+| Bookmarks | ✓ | ✓ |
+| Typed data items | ✓ | ✓ |
+| Function flags (thunk, no-return, inline) | ✓ as BN tags | — |
+| Local variables (storage-aware) | ✓ | partial — register-storage mapping not implemented |
 
 ## Architecture
 
@@ -24,6 +34,8 @@ Ghidra Server  (ghidraSvr, running on the network)
 ```
 
 The plugin spawns a Java subprocess (the "bridge") on load. The bridge holds the RMI connection to the Ghidra Server and speaks a simple JSON protocol back to the plugin over a local TCP socket. This keeps all Java/RMI code out of the C++ process and lets the JVM start in the background while BN finishes loading.
+
+The bridge JVM also initialises Ghidra's `Application` framework at startup so the write path can use Ghidra's high-level program-model APIs (`ProgramDB`, `DataTypeManager`, `SymbolTable`, `FunctionManager`) rather than raw `db.Table.putRecord()` writes — see [Checkin write path](#checkin-write-path) below.
 
 ### Components
 
@@ -42,12 +54,48 @@ The plugin spawns a Java subprocess (the "bridge") on load. The bridge holds the
 - `ui/ConnectDialog.cpp` — host/port/user/password dialog
 
 **Bridge (Java):**
-- `BridgeMain.java` — argument parsing; starts the TCP server; prints `READY port=N` to stdout
+- `BridgeMain.java` — argument parsing; initialises `UniversalIdGenerator` and the Ghidra `Application` framework; starts the TCP server; prints `READY port=N` to stdout
 - `BridgeServer.java` — accepts one TCP client connection and hands it a `BridgeConnection`
-- `BridgeConnection.java` — JSON request dispatcher; serialises Ghidra API responses to JSON
+- `BridgeConnection.java` — JSON request dispatcher; serialises Ghidra API responses to JSON; handles `opCheckin` (creates a new program version on the server)
 - `GhidraSession.java` — authenticated RMI session; wraps `RemoteRepositoryServerHandle`
 - `EventStreamer.java` — background thread per open repo; pushes `RepositoryChangeEvent`s to the plugin as async JSON events
-- `DatabaseExporter.java` — reads a `ManagedBufferFileHandle` (Ghidra's remote DB buffer) directly via `db.jar`; extracts symbol, comment, and function-flag tables without requiring `SoftwareModeling.jar` or any processor JARs
+- `DatabaseExporter.java` — read path: extracts symbol/comment/function-flag/data-type/equate/bookmark tables from a `ManagedBufferFileHandle` (Ghidra's remote DB buffer) via raw `db.jar` access
+- `ProgramApplier.java` — write path: opens the buffer file as a real `ProgramDB` and applies all BN-side changes through Ghidra's high-level APIs (see [Checkin write path](#checkin-write-path) below)
+- `DatabaseImporter.java` — legacy raw-write helpers kept only as a test seam; production `apply(...)` delegates to `ProgramApplier`
+
+## Checkin write path
+
+`opCheckin` opens the program's managed buffer file in write mode, constructs a `ProgramDB` over it, and applies BN-side changes through Ghidra's program-model APIs. **Raw `db.Table.putRecord()` writes are avoided** — they were the source of every checkin-corruption bug we ever hit:
+
+| Wrong-tier write | Failure mode |
+|---|---|
+| `setIntValue(col, longTypeId)` on Function Data table | `IntField.setLongValue` silently `l2i`-truncates → StackPurge corrupted on every signature update |
+| `setByteValue(col, isUnion)` on V5V6 Composite Data Types | column is `BooleanField` in Ghidra 12.x → `IllegalFieldAccessException` ("Illegal field access") |
+| `setIntValue(col, 0)` on V2 Typedef Flags column | column is `ShortField` → same crash, different schema |
+| Writing composite header without component-settings rows | `CompositeEditorModel.cloneAllComponentSettings` throws `ArrayIndexOutOfBoundsException` when struct is opened in Ghidra |
+| Writing PARAMETER symbol with `SYM_ADDR_COL` = RAM address | `Address is not a VariableAddress` thrown by `FunctionDB.loadSymbolBasedVariables` on any function access |
+| Passing `null` `DBChangeSet` to `DBHandle.save()` | server writes a 0-byte change-data file → next checkout fails with `EOFException` in `ProgramContentHandler.loadProgramChangeSet` |
+
+`ProgramApplier` doesn't have these traps because it routes through `DataTypeManager.addDataType`, `SymbolTable.createLabel`, `Listing.setComment`, `Function.setReturnType`, etc. — APIs that maintain Ghidra's interlocking-table invariants automatically. It also runs a `cleanupBadVariableSymbols` pass at the start of every checkin to purge corruption left in the database by older bridge versions.
+
+`server-package/CleanupBadVariableSymbols.java` is a standalone `GhidraScript` that runs the same cleanup via `analyzeHeadless` — useful when a file is too corrupted to open in the Ghidra GUI.
+
+## Testing
+
+```sh
+./test.sh        # macOS / Linux: runs C++ tests + Java tests
+test.bat         # Windows equivalent
+```
+
+The Java side has **two test layers**:
+
+- **Legacy raw-write tests** (`*Test.java`) — exercise the deprecated `DatabaseImporter.applyXxx` helpers against an in-memory `DBHandle`. Fast; do not require a Ghidra install. Kept because they pin down behaviour of the helpers tests still call directly.
+- **Round-trip tests** (`*RoundTripTest.java`) — exercise the production `ProgramApplier` write path against a real `ProgramDB` built with Ghidra's `ProgramBuilder`. Each kind (symbols, comments, data types, function sigs, parameters, equates, bookmarks, data items) has its own class. **Three explicit regression pins**:
+  - `DataTypesRoundTripTest.struct_cloneSettings_doesNotThrow` — composite settings must stay consistent with header (cloneAllComponentSettings crash)
+  - `FunctionSignaturesRoundTripTest.returnType_doesNotCorruptStackPurge` — IntField truncation
+  - `ParametersRoundTripTest.noParameterSymbol_endsUpAtRamAddress` — VariableAddress invariant
+
+Round-trip tests require a Ghidra install (used at runtime for language services). The path is read from the `ghidra.home` Gradle system property or `GHIDRA_HOME` env var; `build.gradle` passes `ghidraHome` through by default.
 
 ## Prerequisites
 
@@ -198,13 +246,48 @@ After installing, set these in Binary Ninja's settings (`Edit → Preferences �
 
 The plugin and bridge communicate over a local TCP socket using newline-delimited JSON. Every request carries an integer `id` and a string `op`; every response echoes the `id`. Async events (server-side repository changes) carry an `"event"` key instead.
 
-Supported ops: `ping`, `connect`, `disconnect`, `status`, `list_repos`, `open_repo`, `close_repo`, `list_items`, `get_subfolders`, `get_versions`, `get_checkouts`, `checkout`, `terminate_checkout`, `open_db`.
+| Op | Direction | Purpose |
+|---|---|---|
+| `ping`, `status`, `connect`, `disconnect` | request/response | session lifecycle |
+| `list_repos`, `open_repo`, `close_repo` | request/response | repo enumeration |
+| `list_items`, `get_subfolders` | request/response | repo browsing |
+| `get_versions`, `get_checkouts` | request/response | version control state |
+| `checkout`, `terminate_checkout` | request/response | exclusive write lock |
+| `open_db` | request/response | read full Ghidra DB → JSON (heavy) |
+| `checkin` | request/response | apply BN-side changes → new repo version (heavy, via `ProgramApplier`) |
+| `download_binary`, `upload_binary` | request/response | move the original binary in/out |
+| `delete_item` | request/response | remove file from repo |
+| `repo_changed` | event (async) | server-side `RepositoryChangeEvent` push |
 
-`open_db` is the heavy operation: it fetches the full Ghidra database buffer over RMI, then reads the Symbols, Comments, and Function Data tables directly from the raw DB layer (no Ghidra headless analysis required). The result is streamed back as a single JSON response with `symbols`, `comments`, and `func_flags` arrays.
+## Continuing on another machine
+
+The repository contains everything needed to rebuild from scratch. Per-developer setup that isn't in git:
+
+1. **Clone + submodules**:
+   ```sh
+   git clone https://github.com/colinmkinsella/ghidra_svr.git
+   cd ghidra_svr
+   git submodule update --init --recursive
+   ```
+2. **Local Ghidra path**: create `bridge/gradle.properties`:
+   ```properties
+   ghidraHome=C:/Users/<you>/ghidra/ghidra_12.0.4_PUBLIC
+   ```
+   (Forward slashes work on Windows too — Gradle prefers them.)
+3. **Ghidra + Binary Ninja installations**: same setup as your other machines.
+4. **Qt**: either point `Qt6_DIR` at an existing install or run `./build.sh qt` (Windows: `build.bat qt`) once.
+
+When opening a fresh Claude Code session, the best onboarding pointers are this README plus the current state on `dev`:
+
+- Architecture and write-path invariants: this file
+- Production write path: `bridge/src/main/java/com/ghidra_svr/bridge/ProgramApplier.java`
+- Test harness: `bridge/src/test/java/com/ghidra_svr/bridge/ProgramTestBase.java`
+- Round-trip suites: `bridge/src/test/java/com/ghidra_svr/bridge/*RoundTripTest.java`
+- Recent commits: `git log --oneline` — each subject line says what changed and why
 
 ## Known limitations / pending work
 
-- **Address rebase**: Ghidra stores addresses as raw virtual addresses. If Ghidra and BN loaded the binary at different image bases, imported symbols will land at the wrong addresses. A rebase step is in progress.
-- **Write-back**: pushing BN analysis (renames, comments) back to Ghidra is not yet implemented.
-- **Authentication**: only username + password is supported. PKI and SSH-key callbacks are not yet handled.
-- **Single address space**: the `DatabaseExporter` assumes a single RAM address space. Overlay spaces or Harvard architectures may produce incorrect addresses.
+- **Local variable storage**: `ProgramApplier` skips `is_local` parameter entries because mapping BN register indices to Ghidra storage requires a per-architecture register-table translation. Parameters work; locals don't sync yet.
+- **Authentication**: only username + password. PKI and SSH-key callbacks are not yet handled.
+- **Single address space**: `DatabaseExporter` assumes a single RAM address space. Overlay spaces or Harvard architectures may produce incorrect addresses.
+- **Change-set merge**: the bridge writes an *empty* `DBChangeSet` to keep checkouts working. Ghidra's merge-on-checkout machinery therefore can't auto-resolve concurrent edits between BN and Ghidra users — last writer wins.
