@@ -17,11 +17,33 @@ repositories {
 
 // Ghidra JARs are provided at runtime via classpath; we only need them to compile against.
 // Point ghidraHome at your Ghidra installation directory in gradle.properties.
-def ghidraJars = fileTree(dir: "${ghidraHome}/Ghidra/Framework", include: '**/lib/*.jar')
+def ghidraJars = fileTree(dir: "${ghidraHome}", includes: [
+    'Ghidra/Framework/**/lib/*.jar',
+    // Features/Base provides HeadlessGhidraApplicationConfiguration for ProgramDB init,
+    // and the ProgramDB / DataTypeManager / SymbolTable / FunctionManager APIs we use
+    // for write-mode checkin operations.
+    'Ghidra/Features/Base/lib/*.jar'
+])
 
 dependencies {
     implementation 'com.google.code.gson:gson:2.10.1'
     compileOnly ghidraJars
+
+    // Unit tests — JUnit 5 + Ghidra DB jar for in-memory DBHandle
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testImplementation ghidraJars
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+    // Show individual test names in the build output
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat 'full'
+    }
+    // Round-trip tests boot a real Ghidra Application; they need the install path.
+    systemProperty 'ghidra.home', ghidraHome
 }
 
 shadowJar {

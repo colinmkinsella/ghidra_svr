@@ -50,6 +50,12 @@ void ConnectDialog::loadSettings() {
     m_user->setText(QString::fromStdString(s->Get<std::string>("ghidra.defaultUser")));
 }
 
+void ConnectDialog::preload(const QString& host, int port, const QString& user) {
+    if (!host.isEmpty()) m_host->setText(host);
+    if (port > 0)        m_port->setText(QString::number(port));
+    if (!user.isEmpty()) m_user->setText(user);
+}
+
 void ConnectDialog::saveSettings() {
     auto s = BinaryNinja::Settings::Instance();
     s->Set("ghidra.defaultHost", host().toStdString());

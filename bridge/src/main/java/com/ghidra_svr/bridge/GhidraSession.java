@@ -5,6 +5,7 @@ import ghidra.framework.store.CheckoutType;
 import ghidra.framework.store.ItemCheckoutStatus;
 import ghidra.framework.store.Version;
 
+import javax.net.ssl.SSLHandshakeException;
 import javax.rmi.ssl.SslRMIClientSocketFactory;
 import javax.security.auth.Subject;
 import javax.security.auth.callback.*;
@@ -34,26 +35,64 @@ public class GhidraSession {
             throws Exception {
         disconnect();
 
-        // Ghidra 9.1+ wraps the RMI registry itself in SSL.
-        Registry registry = LocateRegistry.getRegistry(host, port, new SslRMIClientSocketFactory());
+        try {
+            // Ghidra 9.1+ wraps the RMI registry itself in SSL.
+            Registry registry = LocateRegistry.getRegistry(host, port, new SslRMIClientSocketFactory());
 
-        GhidraServerHandle handle =
-                (GhidraServerHandle) registry.lookup(GhidraServerHandle.BIND_NAME);
-        handle.checkCompatibility(GhidraServerHandle.INTERFACE_VERSION);
+            GhidraServerHandle handle =
+                    (GhidraServerHandle) registry.lookup(GhidraServerHandle.BIND_NAME);
+            handle.checkCompatibility(GhidraServerHandle.INTERFACE_VERSION);
 
-        Callback[] callbacks = handle.getAuthenticationCallbacks();
-        if (callbacks != null) {
-            satisfyCallbacks(callbacks, user, password);
+            Callback[] callbacks = handle.getAuthenticationCallbacks();
+            if (callbacks != null) {
+                satisfyCallbacks(callbacks, user, password);
+            }
+
+            Subject subject = new Subject();
+            subject.getPrincipals().add(new GhidraPrincipal(user));
+            subject.setReadOnly();
+
+            serverHandle = handle.getRepositoryServer(subject, callbacks);
+            // Signal to the server that the client has fully connected.
+            serverHandle.connected();
+            connectedUser = user;
+
+        } catch (SSLHandshakeException e) {
+            throw new Exception(classifySSLError(e), e);
+        } catch (java.rmi.RemoteException e) {
+            // RemoteException wraps the SSL failure when it occurs during the RMI call itself.
+            Throwable cause = e.getCause();
+            if (cause instanceof SSLHandshakeException) {
+                throw new Exception(classifySSLError((SSLHandshakeException) cause), e);
+            }
+            throw e;
         }
+    }
 
-        Subject subject = new Subject();
-        subject.getPrincipals().add(new GhidraPrincipal(user));
-        subject.setReadOnly();
+    /**
+     * Returns a human-readable message for SSL handshake failures, with a hint
+     * pointing to the Binary Ninja setting that disables certificate validation.
+     */
+    private static String classifySSLError(SSLHandshakeException e) {
+        String msg = e.getMessage() != null ? e.getMessage() : "";
+        String cause = e.getCause() != null ? e.getCause().getMessage() : "";
+        String combined = msg + " " + cause;
 
-        serverHandle = handle.getRepositoryServer(subject, callbacks);
-        // Signal to the server that the client has fully connected.
-        serverHandle.connected();
-        connectedUser = user;
+        if (combined.contains("PKIX") || combined.contains("unable to find valid certification path")
+                || combined.contains("certificate_unknown")) {
+            return "SSL certificate not trusted — the Ghidra Server is likely using a self-signed "
+                    + "certificate. Enable 'Trust All Certs' in Binary Ninja settings "
+                    + "(Preferences → Settings → search 'Ghidra' → ghidra.trustAllCerts) "
+                    + "and restart Binary Ninja.";
+        }
+        if (combined.contains("No subject alternative") || combined.contains("hostname")) {
+            return "SSL hostname mismatch — the server certificate was not issued for '"
+                    + "the hostname you connected to. Enable 'Trust All Certs' in Binary Ninja "
+                    + "settings (Preferences → Settings → search 'Ghidra' → ghidra.trustAllCerts) "
+                    + "and restart Binary Ninja, or regenerate the server certificate with the "
+                    + "correct hostname.";
+        }
+        return "SSL handshake failed: " + msg;
     }
 
     public synchronized void disconnect() {

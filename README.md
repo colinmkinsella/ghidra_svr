@@ -53,21 +53,110 @@ The plugin spawns a Java subprocess (the "bridge") on load. The bridge holds the
 
 | Dependency | Notes |
 |------------|-------|
-| Binary Ninja (commercial) | Tested against the version matching the auto-fetched API commit in `api_REVISION.txt` |
-| Ghidra Server | Tested with Ghidra 12.0.4. The server must be running and reachable over RMI/SSL |
-| Java 17+ JDK | Eclipse Adoptium JDK 21 recommended; path set in BN settings |
-| Visual Studio 2022+ | MSVC C++ toolchain; LLVM/clang should also work with minor CMake edits |
-| Qt 6.7+ | Required for the BN UI plugin; `qmake` must be on `PATH` at build time |
+| Binary Ninja (commercial) | Tested against the version matching `api_REVISION.txt` in the BN install |
+| Ghidra Server | Tested with Ghidra 12.0.4. Must be running and reachable over RMI/SSL |
+| Java 17+ JDK | Eclipse Adoptium JDK 21 recommended |
+| CMake 3.24+ | |
+| Ninja | |
+| C++ compiler | MSVC 2022+ on Windows; clang on macOS; gcc/clang on Linux |
+| Qt 6.7+ | See [Qt setup](#qt-setup) below; `qmake` must be on `PATH` at build time |
 | Gradle (via wrapper) | The bridge uses the Gradle wrapper — no separate install needed |
+| **Poetry** *(Qt build only)* | Required only when building Qt from the `qt-build` submodule. Install with `pip install poetry` or `pipx install poetry`. |
+| **libclang 19** *(Qt build only)* | Required by Qt's build system. See `qt-build/README.md` for download instructions. |
+
+## Qt setup
+
+The plugin links against the same Qt 6 build that Binary Ninja uses. You have two options:
+
+**Option A — Use an existing Qt install** (fastest if you already have Qt)
+
+Pass `Qt6_DIR` pointing at your Qt CMake directory:
+```sh
+Qt6_DIR=/path/to/Qt/6.x.y/clang_64/lib/cmake/Qt6 ./build.sh
+```
+On macOS the build script auto-detects Qt if it was installed by the Qt online installer under `/usr/local/Qt*`.
+
+**Option B — Build Qt from the `qt-build` submodule** (~1-2 hours, once per machine)
+
+The `qt-build` submodule (Vector35's Qt build scripts) compiles Qt 6 with Binary Ninja's patches. It requires Poetry and libclang 19 (see Prerequisites above and `qt-build/README.md`).
+
+Qt is installed to `qt/<version>/<compiler>/` inside the repo:
+
+| Platform | Install path |
+|----------|-------------|
+| macOS | `qt/6.10.1/clang_64/` |
+| Linux x86-64 | `qt/6.10.1/gcc_64/` |
+| Windows | `qt/6.10.1/msvc2022_64/` |
+
+```sh
+# First time on a new machine:
+./build.sh qt          # compiles Qt — takes 1-2 hours
+
+# All subsequent builds (Qt cached in qt/, reused automatically):
+./build.sh
+```
+
+The `qt` step is only needed once. CMake and the build scripts detect the built Qt in `qt/` on every subsequent run and skip the submodule entirely. The `qt/` directory is gitignored.
 
 ## Building
 
-```bat
-rem Full clean build + install into BN plugins folder
-build.bat clean install
+### Fresh checkout
 
+```sh
+git clone https://github.com/your-org/ghidra_svr
+cd ghidra_svr
+git submodule update --init   # populates binaryninja-api and qt-build (~seconds)
+```
+
+Then follow the Qt setup above (Option A or B), and run:
+
+```sh
+./build.sh install
+```
+
+### macOS / Linux
+
+```sh
+# Incremental build of both components
+./build.sh
+
+# Full clean rebuild + install into BN plugins folder
+./build.sh clean install
+
+# Build only the C++ plugin
+./build.sh plugin
+
+# Build only the Java bridge
+./build.sh bridge
+
+# Build Qt once on a machine without Qt installed
+./build.sh qt
+```
+
+Environment variables (all optional — the script sets sensible defaults):
+
+```sh
+BN_INSTALL=/Applications/Binary\ Ninja.app/Contents/MacOS
+Qt6_DIR=/usr/local/Qt-6.7.2/lib/cmake/Qt6
+```
+
+### Windows
+
+Edit the paths at the top of `build.bat` to match your environment before first use:
+
+```bat
+set "JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot"
+set "VSDEVCMD=C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat"
+set "Qt6_DIR=C:\qt\v6.7.2\lib\cmake\Qt6"
+set "BN_INSTALL=C:\Program Files\Vector35\BinaryNinja"
+```
+
+```bat
 rem Incremental build of both components
 build.bat
+
+rem Full clean rebuild + install into BN plugins folder
+build.bat clean install
 
 rem Build only the C++ plugin
 build.bat plugin
@@ -75,20 +164,11 @@ build.bat plugin
 rem Build only the Java bridge
 build.bat bridge
 
-rem Build and install without rebuilding bridge
-build.bat plugin install
+rem Build Qt once on a machine without Qt installed
+build.bat qt
 ```
 
-Edit the paths at the top of `build.bat` to match your environment before first use:
-
-```bat
-set "JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot"
-set "VSDEVCMD=..."   rem path to VsDevCmd.bat
-set "Qt6_DIR=C:\qt\v6.7.2\lib\cmake\Qt6"
-set "BN_INSTALL=C:\Program Files\Vector35\BinaryNinja"
-```
-
-The C++ build uses CMake FetchContent to clone `binaryninja-api` at the exact commit recorded in `%BN_INSTALL%\api_REVISION.txt`, so the plugin ABI always matches the installed BN version.
+The C++ build uses CMake FetchContent to clone `binaryninja-api` at the exact commit recorded in `api_REVISION.txt`, so the plugin ABI always matches the installed BN version. Ghidra is downloaded automatically by CMake on first configure if `GHIDRA_HOME` is not set.
 
 ## Configuration
 

@@ -11,6 +11,8 @@ import db.buffers.ManagedBufferFileAdapter;
 import db.buffers.ManagedBufferFileHandle;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -66,10 +68,12 @@ public class DatabaseExporter {
 
     // ---- Functions table -----------------------------------------------------
     private static final String FUNCTIONS_TABLE = "Function Data";
-    private static final int FUNC_FLAGS_COL     = 4;
-    private static final int FUNC_FLAG_THUNK    = 0x01;
-    private static final int FUNC_FLAG_NRET     = 0x02;
-    private static final int FUNC_FLAG_INLINE   = 0x04;
+    private static final int FUNC_RET_TYPE_COL  = 1;
+    private static final int FUNC_CC_COL         = 3;
+    private static final int FUNC_FLAGS_COL      = 4;
+    private static final int FUNC_FLAG_THUNK     = 0x01;
+    private static final int FUNC_FLAG_NRET      = 0x02;
+    private static final int FUNC_FLAG_INLINE    = 0x04;
 
     // =========================================================================
 
@@ -87,11 +91,41 @@ public class DatabaseExporter {
             out.addProperty("image_base", addrHex(imageBase));
             out.add("symbols",    exportSymbols(db, addrMap));
             out.add("comments",   exportComments(db, addrMap));
-            out.add("func_flags", exportFuncFlags(db));
+            out.add("func_flags", exportFunctions(db, addrMap));
+            out.add("equates",    exportEquates(db, addrMap));
+            out.add("bookmarks",  exportBookmarks(db, addrMap));
+            out.add("parameters", exportParameters(db, addrMap));
+            out.add("data_types", exportDataTypes(db));
+            out.add("data_items", exportDataItems(db, addrMap));
+            out.add("xref_stats", exportCrossRefStats(db));
             return out;
         } finally {
             db.close();
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test seam
+    // -------------------------------------------------------------------------
+
+    /**
+     * Export from an already-open DBHandle (no RMI / server required).
+     * Package-private so tests in the same package can call it directly.
+     */
+    static JsonObject exportFromHandle(DBHandle db) throws IOException {
+        Map<Long, Long> addrMap = buildAddressMap(db);
+        JsonObject out = new JsonObject();
+        out.addProperty("image_base", addrHex(addrMap.getOrDefault(0L, 0L)));
+        out.add("symbols",    exportSymbols(db, addrMap));
+        out.add("comments",   exportComments(db, addrMap));
+        out.add("func_flags", exportFunctions(db, addrMap));
+        out.add("equates",    exportEquates(db, addrMap));
+        out.add("bookmarks",  exportBookmarks(db, addrMap));
+        out.add("parameters", exportParameters(db, addrMap));
+        out.add("data_types", exportDataTypes(db));
+        out.add("data_items", exportDataItems(db, addrMap));
+        out.add("xref_stats", exportCrossRefStats(db));
+        return out;
     }
 
     // -------------------------------------------------------------------------
@@ -245,25 +279,412 @@ public class DatabaseExporter {
         return arr;
     }
 
-    private static JsonArray exportFuncFlags(DBHandle db) throws IOException {
+    private static JsonArray exportFunctions(DBHandle db, Map<Long, Long> addrMap) throws IOException {
         JsonArray arr = new JsonArray();
         Table table = db.getTable(FUNCTIONS_TABLE);
         if (table == null) return arr;
+
+        // Build typeId → name map (composite + enum + typedef)
+        Map<Long, String> typeNameById = new HashMap<>();
+        buildTypeNameMap(db, typeNameById);
 
         RecordIterator iter = table.iterator();
         while (iter.hasNext()) {
             DBRecord rec = iter.next();
             byte flags = rec.getByteValue(FUNC_FLAGS_COL);
-            if (flags == 0) continue;
+
+            // --- signature fields ---
+            String cc = "";
+            try { cc = emptyIfNull(rec.getString(FUNC_CC_COL)); } catch (Exception ignored) {}
+
+            long retTypeId = -1L;
+            String retTypeName = "";
+            try { retTypeId = rec.getLongValue(FUNC_RET_TYPE_COL); } catch (Exception ignored) {}
+            if (retTypeId >= 0) retTypeName = typeNameById.getOrDefault(retTypeId, "");
+
+            // Skip records with no useful data (no flags, no CC, no return type)
+            if (flags == 0 && cc.isEmpty() && retTypeName.isEmpty()) continue;
 
             JsonObject f = new JsonObject();
-            f.addProperty("key",    rec.getKey());
-            f.addProperty("thunk",  (flags & FUNC_FLAG_THUNK)  != 0);
-            f.addProperty("no_ret", (flags & FUNC_FLAG_NRET)   != 0);
-            f.addProperty("inline", (flags & FUNC_FLAG_INLINE) != 0);
+            f.addProperty("key",         rec.getKey());
+            f.addProperty("thunk",       (flags & FUNC_FLAG_THUNK)  != 0);
+            f.addProperty("no_ret",      (flags & FUNC_FLAG_NRET)   != 0);
+            f.addProperty("inline",      (flags & FUNC_FLAG_INLINE) != 0);
+            f.addProperty("cc",          cc);
+            f.addProperty("ret_type",    retTypeName);
+            f.addProperty("ret_type_id", retTypeId);
             arr.add(f);
         }
         return arr;
+    }
+
+    /** Populate typeId → name from Composite, Enumeration, Typedef, and Built-In tables. */
+    private static void buildTypeNameMap(DBHandle db, Map<Long, String> out) {
+        // Composite (structs/unions) and Enumeration: name is col 0
+        for (String tableName : new String[]{"Composite Data Types", "Enumeration Data Types"}) {
+            Table t = db.getTable(tableName);
+            if (t == null) continue;
+            try {
+                RecordIterator it = t.iterator();
+                while (it.hasNext()) {
+                    DBRecord r = it.next();
+                    String name = r.getString(0);
+                    if (name != null && !name.isEmpty()) out.put(r.getKey(), name);
+                }
+            } catch (Exception ignored) {}
+        }
+        // Typedefs: name is col 2
+        Table t = db.getTable("Typedefs");
+        if (t != null) {
+            try {
+                RecordIterator it = t.iterator();
+                while (it.hasNext()) {
+                    DBRecord r = it.next();
+                    String name = r.getString(2);
+                    if (name != null && !name.isEmpty()) out.put(r.getKey(), name);
+                }
+            } catch (Exception ignored) {}
+        }
+        // Built-in primitive types (int, char, void, etc.): name is col 0
+        // These live in Ghidra's program DB as a "Built-In Data Types" table.
+        for (String tableName : new String[]{"Built-In Data Types", "BuiltInTypes", "Built In Data Types"}) {
+            Table bt = db.getTable(tableName);
+            if (bt == null) continue;
+            try {
+                RecordIterator it = bt.iterator();
+                while (it.hasNext()) {
+                    DBRecord r = it.next();
+                    // Try col 0 (display name) first; fall back to col 1 (class/internal name)
+                    String name = null;
+                    try { name = r.getString(0); } catch (Exception ignored2) {}
+                    if (name == null || name.isEmpty()) {
+                        try { name = r.getString(1); } catch (Exception ignored2) {}
+                    }
+                    if (name != null && !name.isEmpty()) out.put(r.getKey(), name);
+                }
+            } catch (Exception ignored) {}
+            break; // stop at first matching table name
+        }
+
+        // Pointer types: col 0 = DataTypeId of referenced type (-1 = void *)
+        // Two passes handle double pointers (pointer-to-pointer).
+        for (int pass = 0; pass < 2; pass++) {
+            Table ptrTable = db.getTable("Pointer Data Types");
+            if (ptrTable == null) break;
+            try {
+                RecordIterator it = ptrTable.iterator();
+                while (it.hasNext()) {
+                    DBRecord r = it.next();
+                    if (out.containsKey(r.getKey())) continue; // already resolved
+                    long innerTypeId = -1L;
+                    try { innerTypeId = r.getLongValue(0); } catch (Exception ignored2) {}
+                    String innerName = (innerTypeId < 0) ? "void" : out.get(innerTypeId);
+                    if (innerName != null && !innerName.isEmpty())
+                        out.put(r.getKey(), innerName + " *");
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // Array types: col 0 = element DataTypeId, col 2 = element count
+        Table arrayTable = db.getTable("Array Data Types");
+        if (arrayTable != null) {
+            try {
+                RecordIterator it = arrayTable.iterator();
+                while (it.hasNext()) {
+                    DBRecord r = it.next();
+                    long innerTypeId = -1L;
+                    int  elemCount   = 0;
+                    try { innerTypeId = r.getLongValue(0); } catch (Exception ignored2) {}
+                    try { elemCount   = r.getIntValue(2);  } catch (Exception ignored2) {
+                        try { elemCount = r.getIntValue(1); } catch (Exception ignored3) {}
+                    }
+                    String innerName = (innerTypeId < 0) ? "" : out.getOrDefault(innerTypeId, "");
+                    if (!innerName.isEmpty() && elemCount > 0)
+                        out.put(r.getKey(), innerName + "[" + elemCount + "]");
+                }
+            } catch (Exception ignored) {}
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // New exporters: equates, bookmarks, parameters, data types, data items, xref stats
+    // -------------------------------------------------------------------------
+
+    private static JsonArray exportEquates(DBHandle db, Map<Long, Long> addrMap) throws IOException {
+        JsonArray arr = new JsonArray();
+        Table equatesTable = db.getTable("Equates");
+        Table refsTable    = db.getTable("Equate References");
+        if (equatesTable == null) return arr;
+
+        // Build equate id → {name, value}
+        Map<Long, JsonObject> equateMap = new java.util.LinkedHashMap<>();
+        RecordIterator eqIter = equatesTable.iterator();
+        while (eqIter.hasNext()) {
+            DBRecord rec = eqIter.next();
+            JsonObject eq = new JsonObject();
+            eq.addProperty("id",    rec.getKey());
+            eq.addProperty("name",  rec.getString(0));
+            eq.addProperty("value", rec.getLongValue(1));
+            eq.add("refs", new JsonArray());
+            equateMap.put(rec.getKey(), eq);
+        }
+
+        // Add refs
+        if (refsTable != null) {
+            RecordIterator refIter = refsTable.iterator();
+            while (refIter.hasNext()) {
+                DBRecord rec = refIter.next();
+                long eqId    = rec.getLongValue(0);
+                long encoded = rec.getLongValue(1);
+                int  opIdx;
+                try { opIdx = rec.getShortValue(2); }
+                catch (Exception e) { opIdx = rec.getIntValue(2); }
+                long va = decode(encoded, addrMap);
+                if (va < 0) continue;
+                JsonObject eq = equateMap.get(eqId);
+                if (eq == null) continue;
+                JsonObject ref = new JsonObject();
+                ref.addProperty("addr",     addrHex(va));
+                ref.addProperty("op_index", opIdx);
+                eq.getAsJsonArray("refs").add(ref);
+            }
+        }
+
+        for (JsonObject eq : equateMap.values()) {
+            if (eq.getAsJsonArray("refs").size() > 0)
+                arr.add(eq);
+        }
+        return arr;
+    }
+
+    private static JsonArray exportBookmarks(DBHandle db, Map<Long, Long> addrMap) throws IOException {
+        JsonArray arr = new JsonArray();
+        Table typesTable = db.getTable("Bookmark Types");
+        if (typesTable == null) return arr;
+
+        RecordIterator typeIter = typesTable.iterator();
+        while (typeIter.hasNext()) {
+            DBRecord typeRec = typeIter.next();
+            long   typeId   = typeRec.getKey();
+            String typeName = typeRec.getString(0);
+            Table  bmTable  = db.getTable("Bookmarks" + typeId);
+            if (bmTable == null) continue;
+            RecordIterator bmIter = bmTable.iterator();
+            while (bmIter.hasNext()) {
+                DBRecord bm = bmIter.next();
+                long encoded = bm.getLongValue(0);
+                long va      = decode(encoded, addrMap);
+                if (va < 0) continue;
+                JsonObject obj = new JsonObject();
+                obj.addProperty("type",     typeName);
+                obj.addProperty("addr",     addrHex(va));
+                obj.addProperty("category", emptyIfNull(bm.getString(1)));
+                obj.addProperty("comment",  emptyIfNull(bm.getString(2)));
+                arr.add(obj);
+            }
+        }
+        return arr;
+    }
+
+    private static JsonArray exportParameters(DBHandle db, Map<Long, Long> addrMap) throws IOException {
+        JsonArray arr = new JsonArray();
+        Table table = db.getTable("Symbols");
+        if (table == null) return arr;
+
+        // Build typeId → name map for resolving DataTypeId (col 7)
+        Map<Long, String> typeNameById = new HashMap<>();
+        buildTypeNameMap(db, typeNameById);
+
+        RecordIterator iter = table.iterator();
+        while (iter.hasNext()) {
+            DBRecord rec = iter.next();
+            byte type = rec.getByteValue(3);
+            if (type != 6 && type != 7) continue;  // PARAMETER=6, LOCAL_VAR=7
+            String name = rec.getString(0);
+            if (name == null || name.isEmpty()) continue;
+            long encodedFuncAddr = rec.getLongValue(1);
+            long funcVa = decode(encodedFuncAddr, addrMap);
+            if (funcVa < 0) continue;
+            long varOffset = rec.getLongValue(8);
+
+            long dataTypeId = -1L;
+            String typeName = "";
+            try { dataTypeId = rec.getLongValue(7); } catch (Exception ignored) {}
+            if (dataTypeId >= 0) typeName = typeNameById.getOrDefault(dataTypeId, "");
+
+            JsonObject p = new JsonObject();
+            p.addProperty("key",       rec.getKey());
+            p.addProperty("func_addr", addrHex(funcVa));
+            p.addProperty("name",      name);
+            p.addProperty("is_param",  type == 6);
+            p.addProperty("ordinal",   (int)(varOffset & 0xFFFFFFFFL)); // use varoffset as ordinal proxy
+            p.addProperty("type_name", typeName);
+            p.addProperty("type_id",   dataTypeId);
+            arr.add(p);
+        }
+        return arr;
+    }
+
+    private static JsonArray exportDataTypes(DBHandle db) throws IOException {
+        JsonArray arr = new JsonArray();
+
+        // Build typeId → name map for resolving underlying type names in typedefs
+        Map<Long, String> typeNameById = new HashMap<>();
+        buildTypeNameMap(db, typeNameById);
+
+        // Build component map: parentId -> list of components
+        Map<Long, java.util.List<JsonObject>> componentMap = new java.util.LinkedHashMap<>();
+        // Build typeId→name map before scanning components so we can resolve member types
+        Map<Long, String> typeNameById2 = new HashMap<>();
+        buildTypeNameMap(db, typeNameById2);
+
+        Table compTable = db.getTable("Component Data Types");
+        if (compTable != null) {
+            RecordIterator iter = compTable.iterator();
+            while (iter.hasNext()) {
+                DBRecord rec = iter.next();
+                long parentId  = rec.getLongValue(0);
+                long memberTypeId = rec.getLongValue(2);
+                String memberTypeName = typeNameById2.getOrDefault(memberTypeId, "");
+                JsonObject m = new JsonObject();
+                m.addProperty("offset",    rec.getIntValue(1));
+                m.addProperty("type_id",   memberTypeId);
+                m.addProperty("type_name", memberTypeName);
+                m.addProperty("name",      emptyIfNull(rec.getString(3)));
+                m.addProperty("comment",   emptyIfNull(rec.getString(4)));
+                m.addProperty("size",      rec.getIntValue(5));
+                m.addProperty("ordinal",   rec.getIntValue(6));
+                componentMap.computeIfAbsent(parentId, k -> new ArrayList<>()).add(m);
+            }
+        }
+
+        // Export structs/unions
+        Table compositeTable = db.getTable("Composite Data Types");
+        if (compositeTable != null) {
+            RecordIterator iter = compositeTable.iterator();
+            while (iter.hasNext()) {
+                DBRecord rec = iter.next();
+                boolean isUnion;
+                try { isUnion = rec.getBooleanValue(2); }
+                catch (Exception e) { isUnion = rec.getByteValue(2) != 0; }
+                JsonObject dt = new JsonObject();
+                dt.addProperty("id",      rec.getKey());
+                dt.addProperty("kind",    isUnion ? "union" : "struct");
+                dt.addProperty("name",    emptyIfNull(rec.getString(0)));
+                dt.addProperty("comment", emptyIfNull(rec.getString(1)));
+                dt.addProperty("size",    rec.getIntValue(4));
+                JsonArray members = new JsonArray();
+                java.util.List<JsonObject> mList = componentMap.getOrDefault(rec.getKey(), Collections.emptyList());
+                mList.sort((a, b) -> a.get("ordinal").getAsInt() - b.get("ordinal").getAsInt());
+                for (JsonObject m : mList) members.add(m);
+                dt.add("members", members);
+                arr.add(dt);
+            }
+        }
+
+        // Build enum values map: enumId -> list of values
+        Map<Long, java.util.List<JsonObject>> enumValMap = new java.util.LinkedHashMap<>();
+        Table enumValTable = db.getTable("Enumeration Values");
+        if (enumValTable != null) {
+            RecordIterator iter = enumValTable.iterator();
+            while (iter.hasNext()) {
+                DBRecord rec = iter.next();
+                long enumId = rec.getLongValue(2);
+                JsonObject v = new JsonObject();
+                v.addProperty("name",    emptyIfNull(rec.getString(0)));
+                v.addProperty("value",   rec.getLongValue(1));
+                v.addProperty("comment", emptyIfNull(rec.getString(3)));
+                enumValMap.computeIfAbsent(enumId, k -> new ArrayList<>()).add(v);
+            }
+        }
+
+        // Export enums
+        Table enumTable = db.getTable("Enumeration Data Types");
+        if (enumTable != null) {
+            RecordIterator iter = enumTable.iterator();
+            while (iter.hasNext()) {
+                DBRecord rec = iter.next();
+                JsonObject dt = new JsonObject();
+                dt.addProperty("id",      rec.getKey());
+                dt.addProperty("kind",    "enum");
+                dt.addProperty("name",    emptyIfNull(rec.getString(0)));
+                dt.addProperty("comment", emptyIfNull(rec.getString(1)));
+                dt.addProperty("size",    rec.getByteValue(3) & 0xFF);
+                JsonArray values = new JsonArray();
+                for (JsonObject v : enumValMap.getOrDefault(rec.getKey(), Collections.emptyList()))
+                    values.add(v);
+                dt.add("values", values);
+                arr.add(dt);
+            }
+        }
+
+        // Build typeId → size map for resolving typedef sizes (composites + enums)
+        Map<Long, Integer> typeIdToSize = new HashMap<>();
+        if (compositeTable != null) {
+            try {
+                RecordIterator it = compositeTable.iterator();
+                while (it.hasNext()) { DBRecord r = it.next(); typeIdToSize.put(r.getKey(), r.getIntValue(4)); }
+            } catch (Exception ignored) {}
+        }
+        if (enumTable != null) {
+            try {
+                RecordIterator it = enumTable.iterator();
+                while (it.hasNext()) { DBRecord r = it.next(); typeIdToSize.put(r.getKey(), (int)(r.getByteValue(3) & 0xFF)); }
+            } catch (Exception ignored) {}
+        }
+
+        // Export typedefs
+        Table typedefTable = db.getTable("Typedefs");
+        if (typedefTable != null) {
+            RecordIterator iter = typedefTable.iterator();
+            while (iter.hasNext()) {
+                DBRecord rec = iter.next();
+                long underlyingId = -1L;
+                String underlyingName = "";
+                try { underlyingId = rec.getLongValue(0); } catch (Exception ignored) {}
+                if (underlyingId >= 0) underlyingName = typeNameById.getOrDefault(underlyingId, "");
+                // Resolve size from underlying composite/enum; 0 for pointer/built-in (BN infers it)
+                int resolvedSize = typeIdToSize.getOrDefault(underlyingId, 0);
+
+                JsonObject dt = new JsonObject();
+                dt.addProperty("id",                  rec.getKey());
+                dt.addProperty("kind",                "typedef");
+                dt.addProperty("name",                emptyIfNull(rec.getString(2)));
+                dt.addProperty("underlying_type_id",  underlyingId);
+                dt.addProperty("underlying_name",     underlyingName);
+                dt.addProperty("size",                resolvedSize);
+                arr.add(dt);
+            }
+        }
+
+        return arr;
+    }
+
+    private static JsonArray exportDataItems(DBHandle db, Map<Long, Long> addrMap) throws IOException {
+        JsonArray arr = new JsonArray();
+        Table table = db.getTable("Data");
+        if (table == null) return arr;
+        RecordIterator iter = table.iterator();
+        while (iter.hasNext()) {
+            DBRecord rec = iter.next();
+            long encoded = rec.getKey();  // key IS the encoded address
+            long va = decode(encoded, addrMap);
+            if (va < 0) continue;
+            JsonObject item = new JsonObject();
+            item.addProperty("addr",    addrHex(va));
+            item.addProperty("type_id", rec.getLongValue(0));
+            arr.add(item);
+        }
+        return arr;
+    }
+
+    private static JsonObject exportCrossRefStats(DBHandle db) {
+        JsonObject stats = new JsonObject();
+        Table fromTable = db.getTable("FROM REFS");
+        Table toTable   = db.getTable("TO REFS");
+        stats.addProperty("from_count", fromTable != null ? fromTable.getRecordCount() : 0);
+        stats.addProperty("to_count",   toTable   != null ? toTable.getRecordCount()   : 0);
+        return stats;
     }
 
     // -------------------------------------------------------------------------

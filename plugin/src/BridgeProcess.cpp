@@ -19,18 +19,23 @@ static std::wstring widen(const std::string& s) {
 
 std::string BridgeProcess::buildClasspath(const std::string& bridgeJar,
                                           const std::string& ghidraHome) {
+    // We need the full Ghidra Framework module tree on the classpath because
+    // HeadlessGhidraApplicationConfiguration's module initialization pulls in
+    // classes from Docking, Gui, Help, etc.  Plus Features/GhidraServer for RMI
+    // stubs and Features/Base for the headless config class itself.
     static const char* kFramework[] = {
-        "FileSystem", "DB", "Generic", "Utility", "SoftwareModeling", nullptr
+        "DB", "Docking", "Emulation", "FileSystem", "Generic", "Graph", "Gui",
+        "Help", "Project", "Pty", "SoftwareModeling", "Utility", nullptr
     };
     std::string cp = bridgeJar;
     for (int i = 0; kFramework[i]; ++i) {
         cp += ';';
         cp += ghidraHome + "/Ghidra/Framework/" + kFramework[i] + "/lib/*";
     }
-    // GhidraServer.jar contains server-side RMI stubs (e.g. RemoteOutputBlockStreamHandle)
-    // that the client must have on its classpath to deserialise write-mode buffer handles.
     cp += ';';
     cp += ghidraHome + "/Ghidra/Features/GhidraServer/lib/*";
+    cp += ';';
+    cp += ghidraHome + "/Ghidra/Features/Base/lib/*";
     return cp;
 }
 
@@ -72,6 +77,7 @@ bool BridgeProcess::start(const std::string& javaExe,
         << " com.ghidra_svr.bridge.BridgeMain"
         << " --port 0";   // 0 = OS picks a free port
     if (trustAll) cmd << " --trust-all";
+    if (!ghidraHome.empty()) cmd << " --ghidra-home \"" << ghidraHome << "\"";
 
     std::wstring wCmd = widen(cmd.str());
 
@@ -226,8 +232,13 @@ bool BridgeProcess::isRunning() const {
 
 std::string BridgeProcess::buildClasspath(const std::string& bridgeJar,
                                           const std::string& ghidraHome) {
+    // We need the full Ghidra Framework module tree on the classpath because
+    // HeadlessGhidraApplicationConfiguration's module initialization pulls in
+    // classes from Docking, Gui, Help, etc.  Plus Features/GhidraServer for RMI
+    // stubs and Features/Base for the headless config class itself.
     static const char* kFramework[] = {
-        "FileSystem", "DB", "Generic", "Utility", "SoftwareModeling", nullptr
+        "DB", "Docking", "Emulation", "FileSystem", "Generic", "Graph", "Gui",
+        "Help", "Project", "Pty", "SoftwareModeling", "Utility", nullptr
     };
     std::string cp = bridgeJar;
     for (int i = 0; kFramework[i]; ++i) {
@@ -236,6 +247,8 @@ std::string BridgeProcess::buildClasspath(const std::string& bridgeJar,
     }
     cp += ':';
     cp += ghidraHome + "/Ghidra/Features/GhidraServer/lib/*";
+    cp += ':';
+    cp += ghidraHome + "/Ghidra/Features/Base/lib/*";
     return cp;
 }
 
@@ -280,6 +293,10 @@ bool BridgeProcess::start(const std::string& javaExe,
             exe, "-cp", cp, "com.ghidra_svr.bridge.BridgeMain", "--port", "0"
         };
         if (trustAll) argStrs.push_back("--trust-all");
+        if (!ghidraHome.empty()) {
+            argStrs.push_back("--ghidra-home");
+            argStrs.push_back(ghidraHome);
+        }
 
         std::vector<char*> argv;
         for (auto& s : argStrs) argv.push_back(s.data());

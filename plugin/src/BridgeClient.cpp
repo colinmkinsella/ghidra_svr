@@ -23,7 +23,7 @@ namespace {
 // Connect / disconnect
 // ---------------------------------------------------------------------------
 
-bool BridgeClient::connect(int port, std::string& errorOut) {
+bool BridgeClient::connect(const std::string& host, int port, std::string& errorOut) {
     disconnect();
 
     socket_t s = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -32,13 +32,18 @@ bool BridgeClient::connect(int port, std::string& errorOut) {
         return false;
     }
 
+    const char* h = host.empty() ? "127.0.0.1" : host.c_str();
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port   = htons(static_cast<uint16_t>(port));
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (inet_pton(AF_INET, h, &addr.sin_addr) != 1) {
+        errorOut = std::string("Invalid bridge host address: ") + h;
+        CLOSE_SOCK(s);
+        return false;
+    }
 
     if (::connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        errorOut = "connect() to 127.0.0.1:" + std::to_string(port) + " failed";
+        errorOut = "connect() to " + std::string(h) + ":" + std::to_string(port) + " failed";
         CLOSE_SOCK(s);
         return false;
     }

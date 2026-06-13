@@ -103,6 +103,9 @@ add_library(binja-ghidra SHARED
     src/SyncEngine.cpp
     src/ui/ConnectDialog.cpp
     src/ui/ProjectPanel.cpp
+    # Weak stubs for Enterprise/Collaboration API — satisfies the static linker
+    # when building against standard (non-Enterprise) Binary Ninja.
+    src/enterprise_stubs.cpp
     # Headers with Q_OBJECT must be listed so AUTOMOC finds them.
     include/ui/ConnectDialog.h
     include/ui/ProjectPanel.h
@@ -112,6 +115,13 @@ target_include_directories(binja-ghidra PRIVATE
     include
     "${CMAKE_SOURCE_DIR}/../binaryninja-api/vendor"   # nlohmann/json.hpp
 )
+
+# Bake the CMake-resolved Ghidra path as a compile-time fallback for local mode.
+# The runtime ghidra.ghidraHome setting or auto-detection overrides this.
+if(GHIDRA_HOME)
+    target_compile_definitions(binja-ghidra PRIVATE
+        GHIDRA_HOME_DEFAULT="${GHIDRA_HOME}")
+endif()
 
 target_link_libraries(binja-ghidra PRIVATE
     binaryninjaui          # transitively pulls in binaryninjaapi + BN link dirs
@@ -126,6 +136,17 @@ elseif(UNIX AND NOT APPLE)
     target_link_libraries(binja-ghidra PRIVATE dl)
 endif()
 
+if(APPLE)
+    # Keep the build-time RPATHs in the installed dylib.
+    # BN loads plugins via dlopen from its own process, which already has the BN
+    # and Qt libs in its address space, so the RPATHs are effectively unused at
+    # load time — but removing them on every "cmake --install" run causes
+    # install_name_tool to error when the file is "Up-to-date" and the paths
+    # were already stripped on a previous install.  BUILD_WITH_INSTALL_RPATH
+    # tells CMake not to strip/rewrite RPATHs during install.
+    set_target_properties(binja-ghidra PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
+endif()
+
 target_compile_definitions(binja-ghidra PRIVATE
     NOMINMAX
     WIN32_LEAN_AND_MEAN
@@ -134,10 +155,70 @@ target_compile_definitions(binja-ghidra PRIVATE
 
 # ---------------------------------------------------------------------------
 # Install — uses bn_install_plugin() helper defined by the api
+# The bridge JAR is installed alongside the plugin for local mode.
+# In remote mode it lives on the Ghidra server (see server/start-bridge.sh).
 # ---------------------------------------------------------------------------
 bn_install_plugin(binja-ghidra)
+
+# ---------------------------------------------------------------------------
+# Tests (Google Test)
+#
+# The test executable compiles only the Qt-free plugin sources so it can be
+# run without a Binary Ninja installation — just the BN API headers/library
+# are needed.  Run with:  ctest --test-dir plugin/build -V
+# ---------------------------------------------------------------------------
+enable_testing()
+
+FetchContent_Declare(googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG        v1.14.0
+    GIT_SHALLOW    TRUE
+)
+# Prevent GoogleTest from overriding our compiler / linker settings on Windows.
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+# Do NOT let GoogleTest add install() rules — it's a private build-time dependency
+# and trying to install it to /usr/local requires admin rights and is never wanted.
+set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+add_executable(binja-ghidra-tests EXCLUDE_FROM_ALL
+    test/GhidraConnectionStateTest.cpp
+    test/CheckinPreviewTest.cpp
+    test/BridgeClientProtocolTest.cpp
+    # Qt-free production sources only
+    src/BridgeClient.cpp
+    src/GhidraConnection.cpp
+    src/BridgeProcess.cpp
+    src/enterprise_stubs.cpp
+)
+
+target_include_directories(binja-ghidra-tests PRIVATE
+    include
+    "${CMAKE_SOURCE_DIR}/../binaryninja-api/vendor"   # nlohmann/json.hpp
+)
+
+target_link_libraries(binja-ghidra-tests PRIVATE
+    GTest::gtest_main
+    binaryninjaapi   # required for GhidraConnection.cpp symbol references
+)
+
+if(WIN32)
+    target_link_libraries(binja-ghidra-tests PRIVATE ws2_32)
+elseif(UNIX AND NOT APPLE)
+    target_link_libraries(binja-ghidra-tests PRIVATE dl)
+endif()
+
+target_compile_definitions(binja-ghidra-tests PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+    _CRT_SECURE_NO_WARNINGS
+)
+
+include(GoogleTest)
+gtest_discover_tests(binja-ghidra-tests)
 install(FILES
     "${CMAKE_SOURCE_DIR}/../bridge/build/libs/ghidra-bridge-0.1.0.jar"
     DESTINATION "${BN_USER_PLUGINS_DIR}"
-    OPTIONAL
+    OPTIONAL   # skip silently if the JAR has not been built yet
 )

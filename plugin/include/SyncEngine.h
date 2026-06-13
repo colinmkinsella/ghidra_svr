@@ -18,6 +18,13 @@ struct SyncResult {
     std::unordered_map<uint64_t, std::string> addrToCommentKey;      // bnAddr → encoded Ghidra addr
     std::unordered_map<uint64_t, std::string> addrToOriginalComment;     // bnAddr → imported address-level comment
     std::unordered_map<uint64_t, std::string> addrToOriginalFuncComment; // bnAddr → imported plate/function comment
+    std::unordered_map<uint64_t, std::string> addrToCommentField;        // bnAddr → Ghidra column ("eol","pre","post","rep")
+    std::vector<GhidraDataType>  ghidraDataTypes; // baseline — all types Ghidra had at checkout
+    std::vector<GhidraParameter> parameters;      // for param baseline
+    std::vector<GhidraBookmark>  bookmarks;        // for bookmark baseline
+    std::vector<GhidraDataItem>  dataItems;        // for data-item baseline
+    std::vector<GhidraEquate>    equates;          // equate baseline for rename detection
+    std::vector<GhidraFuncSig>   funcSigs;         // function signature baseline
     uint64_t imageBase = 0;  // Ghidra segment-0 VA, needed for encoding new comment addresses
 };
 
@@ -31,6 +38,14 @@ class SyncEngine {
 public:
     static SyncResult applyToView(BinaryViewRef view,
                                   const GhidraDbExport& data);
+
+    /**
+     * Build the address↔key write-back maps from @p data WITHOUT modifying
+     * @p view.  Used to restore check-in state after a restart (where
+     * the user may have pending BN renames that must not be overwritten).
+     */
+    static SyncResult buildWritebackMaps(BinaryViewRef view,
+                                         const GhidraDbExport& data);
 
 private:
     static BinaryNinja::Ref<BinaryNinja::TagType>

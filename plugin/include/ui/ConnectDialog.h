@@ -21,6 +21,9 @@ public:
     QString user()     const;
     QString password() const;
 
+    /** Override the BN-settings defaults (e.g. from .bndb Ghidra link metadata). */
+    void preload(const QString& host, int port, const QString& user);
+
 private:
     QLineEdit* m_host;
     QLineEdit* m_port;

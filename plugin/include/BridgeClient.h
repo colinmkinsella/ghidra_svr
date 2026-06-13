@@ -48,8 +48,8 @@ public:
     BridgeClient(const BridgeClient&) = delete;
     BridgeClient& operator=(const BridgeClient&) = delete;
 
-    /** Connect to the bridge on 127.0.0.1:<port> and start the receive thread. */
-    bool connect(int port, std::string& errorOut);
+    /** Connect to the bridge at <host>:<port> and start the receive thread. */
+    bool connect(const std::string& host, int port, std::string& errorOut);
 
     /** Disconnect and stop the receive thread. */
     void disconnect();

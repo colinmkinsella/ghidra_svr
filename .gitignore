@@ -10,8 +10,7 @@ bridge/.gradle/
 # Ghidra — downloaded at CMake configure time by FetchGhidra.cmake
 ghidra/
 
-# Qt — cloned build scripts and compiled output (FetchQtBuild.cmake)
-qt-build/
+# Qt — compiled output (built by the qt-build submodule)
 qt/
 
 # Local environment — each developer sets their own Ghidra path

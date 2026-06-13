@@ -1,12 +1,16 @@
 #pragma once
 #include <QString>
+#include <QPointer>
+#include <memory>
 #include <ui/sidebarwidget.h>
 #include <ui/uitypes.h>
+#include <binaryninjaapi.h>
 #include "GhidraConnection.h"
 
 // Forward declarations
 class QLabel;
 class QPushButton;
+class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
 class ViewFrame;
@@ -23,6 +27,21 @@ class ViewFrame;
  */
 class ProjectPanel : public SidebarWidget {
     Q_OBJECT
+
+    // -----------------------------------------------------------------------
+    // Watches the active BN project for file additions / deletions so the
+    // Project Files panel stays in sync without requiring a view change.
+    // -----------------------------------------------------------------------
+    class ProjectFileWatcher : public BinaryNinja::ProjectNotification {
+        QPointer<ProjectPanel> m_panel;
+        void notify();
+    public:
+        explicit ProjectFileWatcher(ProjectPanel* p) : m_panel(p) {}
+        void OnAfterProjectFileCreated(BinaryNinja::Project*, BinaryNinja::ProjectFile*) override { notify(); }
+        void OnAfterProjectFileUpdated(BinaryNinja::Project*, BinaryNinja::ProjectFile*) override { notify(); }
+        void OnAfterProjectFileDeleted(BinaryNinja::Project*, BinaryNinja::ProjectFile*) override { notify(); }
+    };
+
 public:
     explicit ProjectPanel(QWidget* parent = nullptr);
     ~ProjectPanel();
@@ -37,7 +56,9 @@ private slots:
     void onTreeContextMenu(const QPoint& pos);
     void onRepoItemExpanded(QTreeWidgetItem* item);
     void onRepoItemDoubleClicked(QTreeWidgetItem* item, int column);
+    void onProjectItemDoubleClicked(QTreeWidgetItem* item, int column);
     void onEventReceived(GhidraEvent evt);
+    void onProjectContextMenu(const QPoint& pos);
     void refreshStatus();
 
 private:
@@ -45,10 +66,49 @@ private:
     QPushButton*  m_connectBtn        = nullptr;
     QPushButton*  m_disconnectBtn     = nullptr;
     QPushButton*  m_refreshBtn        = nullptr;
+    QWidget*      m_projectSection    = nullptr;  ///< Hidden when no project is open
+    QTreeWidget*  m_projectTree       = nullptr;
     QTreeWidget*  m_repoTree          = nullptr;
+
+    /// Debounce timer: coalesces rapid refreshProjectFiles() calls into one.
+    QTimer*       m_refreshTimer      = nullptr;
+    /// Debounce timer: coalesces rapid refreshStatus() calls into one.
+    QTimer*       m_statusTimer       = nullptr;
+    /// Incremented every time populateRepos() clears the tree.  expandFolder()
+    /// callbacks capture this value and no-op if it has changed by the time they
+    /// run, preventing stale callbacks from writing into a freshly-rebuilt tree.
+    int           m_treeGeneration    = 0;
 
     BinaryViewRef m_currentView;
 
+    // Active project watcher — keeps the Project Files panel live.
+    BinaryNinja::Ref<BinaryNinja::Project>  m_watchedProject;
+    std::unique_ptr<ProjectFileWatcher>     m_projectWatcher;
+    void watchProject(BinaryNinja::Ref<BinaryNinja::Project> project);
+    void unwatchProject();
+
+    // True while we know the linked Ghidra item is checked out by the current
+    // user.  Set after upload-with-keep-checkout and cleared after a successful
+    // check-in or explicit checkout termination.  Drives the context menu choice
+    // between "Check In…" (checkout active) and "Check Out…" (no active checkout).
+    bool m_checkedOut = false;
+
+    // Ghidra link stored in the current .bndb's metadata.
+    struct GhidraLink {
+        QString host, user, repo, folder, item;
+        int     port = 0;
+        bool    valid() const { return !host.isEmpty() && !item.isEmpty(); }
+    };
+    GhidraLink m_linkedGhidra;
+
+    /** Assign m_checkedOut and persist the value to project metadata. UI thread only. */
+    void persistCheckedOutState(bool val);
+    /**
+     * Debounced wrapper around refreshStatus(): coalesces multiple rapid calls
+     * (e.g. from repeated notifyViewChanged() firings during analysis) into a
+     * single server round-trip 200 ms after the last call.
+     */
+    void scheduleRefreshStatus();
     void buildUi();
     void updateConnectionButtons(bool connected);
     void populateRepos(const std::vector<std::string>& repos);
@@ -57,11 +117,46 @@ private:
     void importItem(const std::string& repo, const std::string& folder,
                     const std::string& name);
     void doCheckin();
+    /** Called once check-in state is confirmed to be loaded. */
+    void doCheckinWithState();
     void showHistory(const QString& repo, const QString& folder, const QString& name);
     void downloadBinary(const QString& repo, const QString& folder, const QString& name);
+    void openItemIntoNewView(const QString& repo, const QString& folder, const QString& name);
+    /**
+     * Project-aware double-click handler: checks whether @p repo/@p folder/@p name
+     * already exists in the open BN project (opens it), or downloads the binary,
+     * adds it to the project, stores Ghidra link metadata, and opens it so that
+     * notifyViewChanged auto-imports symbols.  Falls back to openItemIntoNewView
+     * if no project is open.
+     */
+    void addItemToProject(const QString& repo, const QString& folder, const QString& name);
     QTreeWidgetItem* findTreeItem(const QString& repo, const QString& folder,
                                   const QString& name) const;
     void setItemCheckedOut(QTreeWidgetItem* item, bool checkedOut);
     void addActivityEntry(const QString& text);
     void logError(const QString& msg);
+
+    /** Rebuild the Project Files section from the current BN project (if any). */
+    void refreshProjectFiles();
+    /**
+     * Schedule a debounced refresh: if called multiple times within 150 ms
+     * (e.g. from the ProjectFileWatcher + the importItem callback + notifyViewChanged)
+     * only one actual refreshProjectFiles() call is made.
+     */
+    void scheduleRefreshProjectFiles();
+    /**
+     * If the currently open file is inside a BN project but its Ghidra link
+     * exists only in the .bndb metadata (imported before the project existed),
+     * promote that data into the project-level metadata so it shows up in the
+     * Project Files panel alongside other files.
+     */
+    void migrateStandaloneMetadata();
+    /**
+     * Upload the binary at @p filePath to the Ghidra server as a new repository
+     * item and store the resulting Ghidra link in the BN project metadata.
+     * @p projectFileId identifies the BN ProjectFile to tag with the link.
+     */
+    void uploadToGhidra(const QString& filePath,
+                        const QString& fileName,
+                        const QString& projectFileId);
 };
