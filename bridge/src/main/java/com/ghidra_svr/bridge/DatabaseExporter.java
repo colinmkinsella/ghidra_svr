@@ -10,6 +10,13 @@ import db.Table;
 import db.buffers.ManagedBufferFileAdapter;
 import db.buffers.ManagedBufferFileHandle;
 
+import ghidra.framework.data.OpenMode;
+import ghidra.program.database.ProgramDB;
+import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSpace;
+import ghidra.program.model.mem.MemoryBlock;
+import ghidra.util.task.TaskMonitor;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -80,6 +87,22 @@ public class DatabaseExporter {
     public static JsonObject export(ManagedBufferFileHandle remoteHandle) throws IOException {
         ManagedBufferFileAdapter adapter = new ManagedBufferFileAdapter(remoteHandle);
         DBHandle db = new DBHandle(adapter);
+
+        // Best-effort: open a high-level ProgramDB (read-only) over the same handle
+        // so we can read the memory map via the stable Memory API instead of the
+        // version-specific raw "Memory Blocks" tables.  If the open fails (e.g. the
+        // program's language isn't installed locally) we fall back to raw-table
+        // reads only — every other category works without ProgramDB, so a missing
+        // language must not block the entire import.
+        Object consumer = new Object();
+        ProgramDB program = null;
+        try {
+            program = new ProgramDB(db, OpenMode.IMMUTABLE, TaskMonitor.DUMMY, consumer);
+        } catch (Throwable t) {
+            System.err.println("[ghidra-bridge] ProgramDB open failed; memory map unavailable: "
+                + t.getClass().getSimpleName() + ": " + t.getMessage());
+        }
+
         try {
             Map<Long, Long> addrMap = buildAddressMap(db);
             System.err.println("[ghidra-bridge] address map loaded: " + addrMap.size() + " segments");
@@ -97,10 +120,17 @@ public class DatabaseExporter {
             out.add("parameters", exportParameters(db, addrMap));
             out.add("data_types", exportDataTypes(db));
             out.add("data_items", exportDataItems(db, addrMap));
+            out.add("memory_blocks", program != null ? exportMemoryBlocks(program) : new JsonArray());
             out.add("xref_stats", exportCrossRefStats(db));
             return out;
         } finally {
-            db.close();
+            // Releasing the program closes the underlying DBHandle; only close the
+            // handle directly when we never opened a ProgramDB over it.
+            if (program != null) {
+                try { program.release(consumer); } catch (Exception ignored) {}
+            } else {
+                db.close();
+            }
         }
     }
 
@@ -675,6 +705,47 @@ public class DatabaseExporter {
             item.addProperty("type_id", rec.getLongValue(0));
             arr.add(item);
         }
+        return arr;
+    }
+
+    /**
+     * Export Ghidra's memory map via the high-level Memory API.
+     *
+     * Read through ProgramDB rather than the raw "Memory Blocks" / "Sub Memory
+     * Blocks" tables because that schema is version-specific and fragile (the
+     * same class of trap the checkin write path avoids).  {@link MemoryBlock} is
+     * a stable API across Ghidra versions.
+     *
+     * Overlay blocks and any block not in the default address space are flagged
+     * so the BN side can skip them — the plugin assumes a single RAM space.
+     *
+     * Package-private so the round-trip test can call it with a ProgramBuilder
+     * program directly.
+     */
+    static JsonArray exportMemoryBlocks(ProgramDB program) {
+        JsonArray arr = new JsonArray();
+        try {
+            AddressSpace defSpace = program.getAddressFactory().getDefaultAddressSpace();
+            for (MemoryBlock b : program.getMemory().getBlocks()) {
+                Address start = b.getStart();
+                boolean overlay = b.isOverlay()
+                    || !start.getAddressSpace().equals(defSpace);
+
+                JsonObject o = new JsonObject();
+                o.addProperty("name",        b.getName());
+                o.addProperty("addr",        addrHex(start.getOffset()));
+                o.addProperty("size",        addrHex(b.getSize()));
+                o.addProperty("r",           b.isRead());
+                o.addProperty("w",           b.isWrite());
+                o.addProperty("x",           b.isExecute());
+                o.addProperty("initialized", b.isInitialized());
+                o.addProperty("overlay",     overlay);
+                arr.add(o);
+            }
+        } catch (Exception e) {
+            System.err.println("[ghidra-bridge] memory block export error: " + e.getMessage());
+        }
+        System.err.println("[ghidra-bridge] memory blocks exported: " + arr.size());
         return arr;
     }
 

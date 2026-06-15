@@ -156,6 +156,45 @@ SyncResult SyncEngine::applyToView(Ref<BinaryView> view, const GhidraDbExport& d
     std::unordered_map<int64_t, uint64_t> keyToAddr;
     keyToAddr.reserve(data.symbols.size());
 
+    // Default platform — used to create functions Ghidra found that BN missed.
+    // Held as a Ref so it stays alive while we use it across the symbol loop.
+    Ref<Platform> defaultPlat = view->GetDefaultPlatform();
+
+    // -----------------------------------------------------------------------
+    // Memory map — import Ghidra's blocks as named BN sections, adding segments
+    // only for ranges BN's own loader didn't already map (e.g. Ghidra's EXTERNAL
+    // block, uninitialized regions).  Existing segments are never modified, so
+    // the loaded view's layout can't be corrupted.  Runs before symbols so any
+    // functions / data created in Ghidra-only regions have backing memory —
+    // and because AddUserSection requires the range to already be mapped.
+    // -----------------------------------------------------------------------
+    for (const auto& mb : data.memoryBlocks) {
+        if (mb.size == 0 || mb.overlay) continue; // skip empty / overlay spaces
+        uint64_t start = applyRebase(mb.addr);
+
+        // Add a segment only when BN doesn't already map this range.  We don't
+        // transfer block bytes here, so the segment is zero-filled (dataLength=0)
+        // — the real cases for an unmapped Ghidra block are its EXTERNAL and
+        // uninitialized regions, which are zero-filled anyway.
+        if (!view->GetSegmentAt(start)) {
+            uint32_t flags = 0;
+            if (mb.read)    flags |= SegmentReadable;
+            if (mb.write)   flags |= SegmentWritable;
+            if (mb.execute) flags |= SegmentExecutable;
+            flags |= mb.execute ? SegmentContainsCode : SegmentContainsData;
+            view->AddUserSegment(start, mb.size, /*dataOffset=*/0, /*dataLength=*/0, flags);
+            ++result.segmentsAdded;
+        }
+
+        BNSectionSemantics sem = mb.execute ? ReadOnlyCodeSectionSemantics
+                               : mb.write   ? ReadWriteDataSectionSemantics
+                                            : ReadOnlyDataSectionSemantics;
+        std::string name = mb.name.empty()
+            ? ("ghidra_" + std::to_string(start)) : mb.name;
+        view->AddUserSection(name, start, mb.size, sem);
+        ++result.sectionsAdded;
+    }
+
     // -----------------------------------------------------------------------
     // Symbols
     // -----------------------------------------------------------------------
@@ -219,6 +258,23 @@ SyncResult SyncEngine::applyToView(Ref<BinaryView> view, const GhidraDbExport& d
 
         if (applyName)
             view->DefineUserSymbol(new Symbol(bnType, sym.name, addr));
+
+        // Ghidra frequently identifies functions BN's linear sweep / auto-analysis
+        // misses.  Without this, such an address gets a function-typed *label* but
+        // no actual BN function — and the func-flags / signature passes below
+        // (keyed on functions that exist) would silently no-op for it.  Create the
+        // function only when BN has none starting here, mirroring what BN's own
+        // native Ghidra import does.
+        if (sym.type == GhidraSymbolType::Function && defaultPlat) {
+            bool hasFunc = false;
+            auto existing = view->GetAnalysisFunctionsForAddress(addr);
+            for (auto& f : existing)
+                if (f->GetStart() == addr) { hasFunc = true; break; }
+            if (!hasFunc) {
+                view->CreateUserFunction(defaultPlat.GetPtr(), addr);
+                ++result.functionsCreated;
+            }
+        }
 
         ++result.symbolsApplied;
 

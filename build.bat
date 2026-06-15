@@ -5,6 +5,7 @@ rem ===========================================================================
 rem  build.bat  —  Build the binja-ghidra project (Windows)
 rem ===========================================================================
 rem  Usage:  build.bat [clean] [install] [bridge] [plugin] [qt]
+rem                    [--channel stable^|dev] [--bn-api ^<commit^>]
 rem
 rem    (no args)  Build both the C++ plugin and the Java bridge JAR (if Java available)
 rem    clean      Delete build directories before building
@@ -12,6 +13,13 @@ rem    install    Copy the plugin (and JAR if built) into the BN plugins folder
 rem    bridge     Build the Java bridge JAR only + package for server deployment
 rem    plugin     Build the C++ plugin only (skips Java bridge)
 rem    qt         Build Qt 6 via the qt-build submodule (~1-2 hours, first time only)
+rem
+rem  Binary Ninja API version (pick the one matching your installed BN):
+rem    --channel stable   Fetch + build against the latest stable release (default)
+rem    --channel dev      Fetch + build against the latest dev (dev branch head)
+rem    --bn-api <commit>  Build against an explicit commit (no GitHub lookup)
+rem    (--channel and --bn-api are mutually exclusive; stable is the default.
+rem     --channel queries the binaryninja-api GitHub, so it needs network access.)
 rem
 rem  Examples:
 rem    build.bat                   — build everything (Java optional — warns if missing)
@@ -30,11 +38,19 @@ rem ===========================================================================
 rem ---------------------------------------------------------------------------
 rem  Configuration  — adjust paths here if your environment differs
 rem ---------------------------------------------------------------------------
-set "JAVA_HOME=C:\Program Files\Java\jdk-25.0.3+9"
+rem  JAVA_HOME is taken from the environment (needed only for the bridge JAR).
+rem  Set it to a JDK 17+ install before building the bridge; the check below
+rem  reports an actionable error if it is missing or invalid.
 set "VSDEVCMD=C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\Tools\VsDevCmd.bat"
 set "CMAKE_EXE=C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
 set "NINJA_EXE=C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
 set "BN_INSTALL=C:\Program Files\Vector35\BinaryNinja"
+
+rem Binary Ninja API commit is resolved from GitHub at build time (see the
+rem channel-resolution section below): --channel stable fetches the latest
+rem stable release, --channel dev fetches the dev branch head, and
+rem --bn-api <sha> pins an explicit commit without contacting GitHub.
+set "BN_API_REPO=https://api.github.com/repos/Vector35/binaryninja-api"
 
 rem Qt version must match qt-build\target_qt6_version.py
 set "QT_VERSION=6.10.1"
@@ -68,17 +84,68 @@ set DO_BRIDGE=1
 set DO_PLUGIN=1
 set BRIDGE_ONLY=0
 set PLUGIN_ONLY=0
+set "BN_CHANNEL="
+set "BN_API_COMMIT="
 
-for %%A in (%*) do (
-    if /I "%%A"=="clean"   set DO_CLEAN=1
-    if /I "%%A"=="install" set DO_INSTALL=1
-    if /I "%%A"=="bridge"  set BRIDGE_ONLY=1
-    if /I "%%A"=="plugin"  set PLUGIN_ONLY=1
-    if /I "%%A"=="qt"      set DO_QT=1
-)
+rem Use 'shift /1' (not plain 'shift') so %0 — and thus %~dp0 below — is
+rem preserved; plain shift renumbers %0 as well and would corrupt the script path.
+:argloop
+if "%~1"=="" goto argdone
+if /I "%~1"=="clean"     ( set DO_CLEAN=1     & shift /1 & goto argloop )
+if /I "%~1"=="install"   ( set DO_INSTALL=1   & shift /1 & goto argloop )
+if /I "%~1"=="bridge"    ( set BRIDGE_ONLY=1  & shift /1 & goto argloop )
+if /I "%~1"=="plugin"    ( set PLUGIN_ONLY=1  & shift /1 & goto argloop )
+if /I "%~1"=="qt"        ( set DO_QT=1        & shift /1 & goto argloop )
+rem %~2 is captured before the shifts run (the whole line is parsed at once).
+if /I "%~1"=="--channel"  ( set "BN_CHANNEL=%~2"    & shift /1 & shift /1 & goto argloop )
+if /I "%~1"=="--bn-api"   ( set "BN_API_COMMIT=%~2" & shift /1 & shift /1 & goto argloop )
+echo WARNING: ignoring unknown argument '%~1'
+shift /1
+goto argloop
+:argdone
 
 if %BRIDGE_ONLY%==1 if %PLUGIN_ONLY%==0 set DO_PLUGIN=0
 if %PLUGIN_ONLY%==1 if %BRIDGE_ONLY%==0 set DO_BRIDGE=0
+
+rem ---------------------------------------------------------------------------
+rem  Resolve the Binary Ninja API commit from --channel / --bn-api
+rem  (mutually exclusive; defaults to the stable channel).
+rem ---------------------------------------------------------------------------
+if defined BN_CHANNEL if defined BN_API_COMMIT (
+    echo ERROR: pass either --channel or --bn-api, not both.
+    exit /b 1
+)
+rem An explicit --bn-api commit skips the GitHub lookup entirely.
+if defined BN_API_COMMIT goto :bn_have_commit
+
+if not defined BN_CHANNEL set "BN_CHANNEL=stable"
+set "_CH_OK=0"
+if /I "!BN_CHANNEL!"=="stable" set "_CH_OK=1"
+if /I "!BN_CHANNEL!"=="dev"    set "_CH_OK=1"
+if not "!_CH_OK!"=="1" (
+    echo ERROR: --channel must be 'stable' or 'dev' ^(got '!BN_CHANNEL!'^).
+    exit /b 1
+)
+
+echo Fetching latest '!BN_CHANNEL!' binaryninja-api commit from GitHub...
+rem Kept at top level (not inside an if(...) block): the parentheses in the
+rem PowerShell command would otherwise unbalance batch's block parsing.
+rem PowerShell does the HTTPS request + JSON parse (the curl equivalent on
+rem Windows): dev -> dev branch head; stable -> latest stable release's commit.
+for /f "usebackq delims=" %%S in (`powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; $b='%BN_API_REPO%'; try { if ('!BN_CHANNEL!' -eq 'dev') { (Invoke-RestMethod ($b+'/commits/dev')).sha } else { $t=(Invoke-RestMethod ($b+'/releases/latest')).tag_name; (Invoke-RestMethod ($b+'/commits/'+$t)).sha } } catch { '' }"`) do set "BN_API_COMMIT=%%S"
+
+if not defined BN_API_COMMIT (
+    echo ERROR: could not fetch the latest '!BN_CHANNEL!' binaryninja-api commit from GitHub.
+    echo        Check your network connection, or pass --bn-api ^<commit^> explicitly.
+    exit /b 1
+)
+
+:bn_have_commit
+if defined BN_CHANNEL (
+    echo Binary Ninja API: channel '!BN_CHANNEL!' -^> commit !BN_API_COMMIT!
+) else (
+    echo Binary Ninja API: explicit commit !BN_API_COMMIT!
+)
 
 rem ---------------------------------------------------------------------------
 rem  Set up VS developer environment (required for C++ build; harmless otherwise)
@@ -107,8 +174,14 @@ if not exist "%~dp0qt-build\build_win64.bat" (
 
 rem ---------------------------------------------------------------------------
 rem  Build Qt (only when explicitly requested with the 'qt' argument)
+rem
+rem  Guarded with 'goto' rather than a 120-line 'if (...)' block: after VsDevCmd
+rem  runs, %PATH% contains parentheses (e.g. "Program Files (x86)"), which cmd
+rem  expands at parse time and which break paren-matching across a large block
+rem  ("0 was unexpected at this time").  A goto skips the section without parsing
+rem  it as one block.
 rem ---------------------------------------------------------------------------
-if %DO_QT%==1 (
+if not "%DO_QT%"=="1" goto :skip_qt
     echo.
     echo ====== Building Qt %QT_VERSION% via qt-build submodule ======
     echo This takes 1-2 hours on a fresh machine.
@@ -218,6 +291,7 @@ if %DO_QT%==1 (
         -DCMAKE_MAKE_PROGRAM="%NINJA_EXE%" ^
         -DQt6_DIR="%Qt6_DIR%" ^
         -DBN_INSTALL_DIR="%BN_INSTALL%" ^
+        -DBN_API_COMMIT_OVERRIDE="%BN_API_COMMIT%" ^
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
     if %ERRORLEVEL% NEQ 0 (
         echo ERROR: CMake configure failed.
@@ -226,7 +300,7 @@ if %DO_QT%==1 (
     echo.
     echo Qt is ready. Re-run build.bat to build the plugin.
     exit /b 0
-)
+:skip_qt
 
 rem ---------------------------------------------------------------------------
 rem  Clean
@@ -244,16 +318,22 @@ rem ---------------------------------------------------------------------------
 rem  Build Java bridge
 rem ---------------------------------------------------------------------------
 if %DO_BRIDGE%==1 (
-    where java >nul 2>&1
-    if %ERRORLEVEL% NEQ 0 (
+    rem Bridge build needs a JDK; require JAVA_HOME from the environment.
+    rem Use delayed (!JAVA_HOME!) expansion so a path containing parentheses
+    rem (e.g. "Program Files (x86)") doesn't break parsing of this block.
+    set "_JAVA_OK=1"
+    if not defined JAVA_HOME set "_JAVA_OK=0"
+    if defined JAVA_HOME if not exist "!JAVA_HOME!\bin\java.exe" set "_JAVA_OK=0"
+    if "!_JAVA_OK!"=="0" (
         echo.
         if %BRIDGE_ONLY%==1 (
-            echo ERROR: Java not found - cannot build bridge JAR.
-            echo        Install JDK 17+ and ensure java.exe is on PATH, then re-run.
+            echo ERROR: JAVA_HOME is not set ^(or has no bin\java.exe^) - cannot build the bridge JAR.
+            echo        Set JAVA_HOME to a JDK 17+ install and re-run, e.g.:
+            echo            set "JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-21.0.x-hotspot"
             exit /b 1
         ) else (
-            echo NOTE: Java not found - skipping bridge JAR build.
-            echo       To build the JAR later: build.bat bridge
+            echo NOTE: JAVA_HOME is not set ^(or has no bin\java.exe^) - skipping bridge JAR build.
+            echo       Set JAVA_HOME to a JDK 17+ install, then: build.bat bridge
             echo       ^(Java is needed on the build machine to compile the JAR;
             echo        it runs on the Ghidra server in remote mode, or locally in local mode.^)
             set DO_BRIDGE=0
@@ -265,7 +345,9 @@ if %DO_BRIDGE%==1 (
     echo.
     echo ====== Building Java bridge JAR ======
     pushd "%BRIDGE_DIR%"
-    call gradlew.bat shadowJar
+    rem Call with an explicit path: VS dev environments often set
+    rem NoDefaultCurrentDirectoryInExePath, so a bare 'gradlew.bat' isn't found.
+    call "%BRIDGE_DIR%\gradlew.bat" shadowJar
     set BUILD_ERR=!ERRORLEVEL!
     popd
     if !BUILD_ERR! NEQ 0 (
@@ -347,6 +429,7 @@ if %DO_PLUGIN%==1 (
         -DCMAKE_MAKE_PROGRAM="%NINJA_EXE%" ^
         -DQt6_DIR="%Qt6_DIR%" ^
         -DBN_INSTALL_DIR="%BN_INSTALL%" ^
+        -DBN_API_COMMIT_OVERRIDE="%BN_API_COMMIT%" ^
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
     if %ERRORLEVEL% NEQ 0 (
         echo ERROR: CMake configure failed.

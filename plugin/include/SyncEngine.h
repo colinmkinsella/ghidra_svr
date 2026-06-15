@@ -8,6 +8,9 @@ struct SyncResult {
     int      symbolsApplied  = 0;
     int      commentsApplied = 0;
     int      flagsApplied    = 0;
+    int      functionsCreated = 0;
+    int      sectionsAdded   = 0;
+    int      segmentsAdded   = 0;
     uint64_t addrMin         = UINT64_MAX;
     uint64_t addrMax         = 0;
     std::string sampleSymbol;

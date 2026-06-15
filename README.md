@@ -276,6 +276,13 @@ The repository contains everything needed to rebuild from scratch. Per-developer
    (Forward slashes work on Windows too — Gradle prefers them.)
 3. **Ghidra + Binary Ninja installations**: same setup as your other machines.
 4. **Qt**: either point `Qt6_DIR` at an existing install or run `./build.sh qt` (Windows: `build.bat qt`) once.
+5. **Binary Ninja release channel**: the plugin's ABI must match the BN you run. Select the channel when building; the script fetches the matching `binaryninja-api` commit from GitHub:
+   ```sh
+   ./build.sh --channel stable    # default — latest stable release (from GitHub)
+   ./build.sh --channel dev        # latest dev (dev branch head, from GitHub)
+   ./build.sh --bn-api <commit>   # explicit commit, no GitHub lookup (escape hatch)
+   ```
+   `--channel` and `--bn-api` are mutually exclusive; with neither, the **stable** channel is used. `--channel` queries the [Vector35/binaryninja-api](https://github.com/Vector35/binaryninja-api) GitHub (latest `stable/*` release, or the `dev` branch head) so it needs network access. If your installed BN lags the latest release, pass `--bn-api` with the exact SHA from that install's `api_REVISION.txt`.
 
 When opening a fresh Claude Code session, the best onboarding pointers are this README plus the current state on `dev`:
 

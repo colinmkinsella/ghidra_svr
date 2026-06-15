@@ -3,7 +3,7 @@ package com.ghidra_svr.bridge;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import ghidra.program.database.ProgramDB;
-import ghidra.program.model.listing.CodeUnit;
+import ghidra.program.model.listing.CommentType;
 import ghidra.program.model.listing.Listing;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -13,12 +13,12 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * Round-trip tests for the five Ghidra comment kinds: EOL, PRE, POST, PLATE,
  * REPEATABLE.  Validates that ProgramApplier.applyComments maps each JSON field
- * to the correct CodeUnit constant.
+ * to the correct CommentType constant.
  */
 class CommentsRoundTripTest extends ProgramTestBase {
 
     @Test
-    @DisplayName("import: each comment field maps to the right CodeUnit constant")
+    @DisplayName("import: each comment field maps to the right CommentType constant")
     void eachCommentFieldRoutedCorrectly() throws Exception {
         ProgramDB p = newProgram();
         long va = memoryStart() + 0x100;
@@ -36,11 +36,11 @@ class CommentsRoundTripTest extends ProgramTestBase {
         withTx(p, "comments", () -> ProgramApplier.applyComments(p, arr));
 
         Listing l = p.getListing();
-        assertEquals("eol text",   l.getComment(CodeUnit.EOL_COMMENT,        addr(p, va)));
-        assertEquals("pre text",   l.getComment(CodeUnit.PRE_COMMENT,        addr(p, va)));
-        assertEquals("post text",  l.getComment(CodeUnit.POST_COMMENT,       addr(p, va)));
-        assertEquals("plate text", l.getComment(CodeUnit.PLATE_COMMENT,      addr(p, va)));
-        assertEquals("rep text",   l.getComment(CodeUnit.REPEATABLE_COMMENT, addr(p, va)));
+        assertEquals("eol text",   l.getComment(CommentType.EOL,        addr(p, va)));
+        assertEquals("pre text",   l.getComment(CommentType.PRE,        addr(p, va)));
+        assertEquals("post text",  l.getComment(CommentType.POST,       addr(p, va)));
+        assertEquals("plate text", l.getComment(CommentType.PLATE,      addr(p, va)));
+        assertEquals("rep text",   l.getComment(CommentType.REPEATABLE, addr(p, va)));
     }
 
     @Test
@@ -52,8 +52,8 @@ class CommentsRoundTripTest extends ProgramTestBase {
         // Seed both an EOL and a PRE
         withTx(p, "seed", () -> {
             Listing l = p.getListing();
-            l.setComment(addr(p, va), CodeUnit.EOL_COMMENT, "original eol");
-            l.setComment(addr(p, va), CodeUnit.PRE_COMMENT, "original pre");
+            l.setComment(addr(p, va), CommentType.EOL, "original eol");
+            l.setComment(addr(p, va), CommentType.PRE, "original pre");
         });
 
         // Send a JSON that only updates EOL — PRE should remain
@@ -64,8 +64,8 @@ class CommentsRoundTripTest extends ProgramTestBase {
         arr.add(c);
         withTx(p, "partial update", () -> ProgramApplier.applyComments(p, arr));
 
-        assertEquals("new eol",      p.getListing().getComment(CodeUnit.EOL_COMMENT, addr(p, va)));
-        assertEquals("original pre", p.getListing().getComment(CodeUnit.PRE_COMMENT, addr(p, va)));
+        assertEquals("new eol",      p.getListing().getComment(CommentType.EOL, addr(p, va)));
+        assertEquals("original pre", p.getListing().getComment(CommentType.PRE, addr(p, va)));
     }
 
     @Test
@@ -74,7 +74,7 @@ class CommentsRoundTripTest extends ProgramTestBase {
         ProgramDB p = newProgram();
         long va = memoryStart() + 0x300;
         withTx(p, "seed", () ->
-            p.getListing().setComment(addr(p, va), CodeUnit.EOL_COMMENT, "will be cleared"));
+            p.getListing().setComment(addr(p, va), CommentType.EOL, "will be cleared"));
 
         JsonArray arr = new JsonArray();
         JsonObject c = new JsonObject();
@@ -83,6 +83,6 @@ class CommentsRoundTripTest extends ProgramTestBase {
         arr.add(c);
         withTx(p, "clear", () -> ProgramApplier.applyComments(p, arr));
 
-        assertNull(p.getListing().getComment(CodeUnit.EOL_COMMENT, addr(p, va)));
+        assertNull(p.getListing().getComment(CommentType.EOL, addr(p, va)));
     }
 }

@@ -1579,6 +1579,9 @@ void ProjectPanel::importItem(const std::string& repo,
                                           syms    = result.symbolsApplied,
                                           comms   = result.commentsApplied,
                                           flags   = result.flagsApplied,
+                                          funcsCreated = result.functionsCreated,
+                                          sectionsAdded = result.sectionsAdded,
+                                          segmentsAdded = result.segmentsAdded,
                                           addrMin = result.addrMin,
                                           addrMax = result.addrMax,
                                           sample  = result.sampleSymbol,
@@ -1592,6 +1595,14 @@ void ProjectPanel::importItem(const std::string& repo,
                                           connPort = conn.connectedPort()]() {
             addActivityEntry(QString("Import complete: %1 — %2 symbols, %3 comments, %4 flags")
                 .arg(itemName).arg(syms).arg(comms).arg(flags));
+            if (funcsCreated > 0) {
+                addActivityEntry(QString("  Created %1 function(s) Ghidra found that BN had not")
+                    .arg(funcsCreated));
+            }
+            if (sectionsAdded > 0 || segmentsAdded > 0) {
+                addActivityEntry(QString("  Memory map: %1 section(s), %2 new segment(s)")
+                    .arg(sectionsAdded).arg(segmentsAdded));
+            }
             if (syms > 0) {
                 addActivityEntry(QString("  Ghidra addr range: 0x%1 – 0x%2  (sample: %3)")
                     .arg(addrMin, 0, 16).arg(addrMax, 0, 16)

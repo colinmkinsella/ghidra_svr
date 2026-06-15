@@ -14,7 +14,7 @@ rem    --verbose   Pass --gtest_print_time=1 to C++ runner; show all Gradle outp
 rem
 rem  Prerequisites:
 rem    C++ tests: CMake build must be configured (cmake -B plugin\build -S plugin)
-rem    Java tests: Java 17+ on PATH; bridge\gradle.properties must set ghidraHome
+rem    Java tests: JAVA_HOME set to a JDK 17+ install; bridge\gradle.properties must set ghidraHome
 rem
 rem  Exit code:
 rem    0  All selected suites passed
@@ -24,9 +24,16 @@ rem ===========================================================================
 rem ---------------------------------------------------------------------------
 rem  Configuration — mirror build.bat so paths resolve the same way
 rem ---------------------------------------------------------------------------
-set "CMAKE_EXE=cmake"
-rem If cmake is not on PATH, uncomment and set the full path:
-rem set "CMAKE_EXE=C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+rem Mirror build.bat: VsDevCmd provides the MSVC build environment and the
+rem bundled cmake — neither is on PATH by default. Edit these to match your VS
+rem install if it differs (same paths as build.bat).
+set "VSDEVCMD=C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\Tools\VsDevCmd.bat"
+set "CMAKE_EXE=C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+rem If you already have cmake on PATH inside a VS dev prompt: set "CMAKE_EXE=cmake"
+
+rem Binary Ninja install dir — its binaryninjacore.dll must be on PATH so the
+rem test executable can load (gtest discovers + runs it). Mirror build.bat.
+set "BN_INSTALL=C:\Program Files\Vector35\BinaryNinja"
 
 set "SCRIPT_DIR=%~dp0"
 rem Remove trailing backslash
@@ -69,6 +76,14 @@ if %RUN_CPP%==0 goto :skip_cpp
 
 echo.
 echo ====== C++ tests ======
+
+rem Load the MSVC build environment so cmake --build -> ninja -> cl.exe works
+rem (only needed when we actually build; harmless if cl is already on PATH).
+if %DO_BUILD%==1 call "%VSDEVCMD%" -startdir=none -arch=x64 -host_arch=x64 >nul
+
+rem Put binaryninjacore.dll on PATH so the test exe can load — needed both for
+rem gtest's build-time test discovery and for actually running the binary.
+set "PATH=%BN_INSTALL%;%PATH%"
 
 rem Check the build has been configured
 if not exist "%PLUGIN_BUILD%\build.ninja" (
@@ -120,10 +135,14 @@ if %RUN_JAVA%==0 goto :skip_java
 echo.
 echo ====== Java bridge tests ======
 
-where java >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Java not found — cannot run Java tests.
-    echo        Install JDK 17+ and ensure 'java' is on your PATH.
+rem Gradle uses JAVA_HOME; require it (matches build.bat). Delayed !JAVA_HOME!
+rem expansion guards against a path with parentheses breaking this block.
+set "_JAVA_OK=1"
+if not defined JAVA_HOME set "_JAVA_OK=0"
+if defined JAVA_HOME if not exist "!JAVA_HOME!\bin\java.exe" set "_JAVA_OK=0"
+if "!_JAVA_OK!"=="0" (
+    echo ERROR: JAVA_HOME is not set ^(or has no bin\java.exe^) - cannot run the Java tests.
+    echo        Set JAVA_HOME to a JDK 17+ install and re-run.
     set JAVA_STATUS=3
     goto :skip_java
 )
@@ -138,10 +157,12 @@ if not exist "%BRIDGE_DIR%\gradle.properties" (
 echo Running Java tests via Gradle...
 pushd "%BRIDGE_DIR%"
 
+rem Call gradlew by full path: VsDevCmd sets NoDefaultCurrentDirectoryInExePath,
+rem so a bare 'gradlew.bat' would not be found even after pushd.
 if %VERBOSE%==1 (
-    call gradlew.bat test --rerun
+    call "%BRIDGE_DIR%\gradlew.bat" test --rerun
 ) else (
-    call gradlew.bat test --rerun --quiet
+    call "%BRIDGE_DIR%\gradlew.bat" test --rerun --quiet
 )
 set GRADLE_EXIT=%errorlevel%
 popd
@@ -182,10 +203,12 @@ rem ---------------------------------------------------------------------------
 :print_status
 set "_label=%~1"
 set "_code=%~2"
-if %_code%==1 ( echo   %_label%: PASSED  & goto :eof )
-if %_code%==2 ( echo   %_label%: FAILED  & set EXIT_CODE=1 & goto :eof )
-if %_code%==3 ( echo   %_label%: ERROR   & set EXIT_CODE=1 & goto :eof )
-echo   %_label%: skipped
+rem Use delayed (!_label!) expansion: the labels contain parentheses, which would
+rem unbalance these if(...) blocks if expanded at parse time with %_label%.
+if %_code%==1 ( echo   !_label!: PASSED  & goto :eof )
+if %_code%==2 ( echo   !_label!: FAILED  & set EXIT_CODE=1 & goto :eof )
+if %_code%==3 ( echo   !_label!: ERROR   & set EXIT_CODE=1 & goto :eof )
+echo   !_label!: skipped
 goto :eof
 
 rem ---------------------------------------------------------------------------

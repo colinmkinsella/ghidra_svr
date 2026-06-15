@@ -2,6 +2,7 @@
 # build.sh  —  Build the binja-ghidra project (Linux / macOS)
 #
 # Usage:  ./build.sh [clean] [install] [bridge] [plugin] [qt]
+#                    [--channel stable|dev] [--bn-api <commit>]
 #
 #   (no args)  Build both the C++ plugin and the Java bridge JAR (if Java is available)
 #   clean      Delete build directories before building
@@ -9,6 +10,13 @@
 #   bridge     Build the Java bridge JAR only + package it for server deployment
 #   plugin     Build the C++ plugin only (skips Java bridge)
 #   qt         Build Qt 6 via the qt-build submodule (~1-2 hours, first time only)
+#
+# Binary Ninja API version (pick the one matching your installed BN):
+#   --channel stable   Fetch + build against the latest stable release (default)
+#   --channel dev      Fetch + build against the latest dev (dev branch head)
+#   --bn-api <commit>  Build against an explicit commit (no GitHub lookup)
+#   (--channel and --bn-api are mutually exclusive; stable is the default.
+#    --channel queries the binaryninja-api GitHub, so it needs network access.)
 #
 # Examples:
 #   ./build.sh                   — build everything (Java optional — warns if missing)
@@ -26,6 +34,8 @@
 # Environment variables (override defaults):
 #   Qt6_DIR     Path to Qt6 CMake dir  (default: auto-detected)
 #   BN_INSTALL  Path to BN install dir (default: platform-specific — see below)
+#   JAVA_HOME   Path to a JDK 17+ install (required only for the bridge JAR;
+#               must contain bin/java — an error is printed if it's missing)
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +51,12 @@ else
     _ARCH=$(uname -m)
     _QT_COMPILER="gcc_64"
 fi
+
+# Binary Ninja API commit is resolved from GitHub at build time (see the
+# channel-resolution section below): --channel stable fetches the latest stable
+# release, --channel dev fetches the dev branch head, and --bn-api <sha> pins an
+# explicit commit without contacting GitHub.
+BN_API_REPO="https://api.github.com/repos/Vector35/binaryninja-api"
 
 # Qt version must match qt-build/target_qt6_version.py
 _QT_VERSION="6.10.1"
@@ -83,20 +99,65 @@ DO_BRIDGE=1   # on by default (skipped with a warning if Java is absent)
 DO_PLUGIN=1   # on by default
 BRIDGE_ONLY=0
 PLUGIN_ONLY=0
+BN_CHANNEL=""
+BN_API_COMMIT_ARG=""
 
-for arg in "$@"; do
-    case "$(echo "$arg" | tr '[:upper:]' '[:lower:]')" in
+while [[ $# -gt 0 ]]; do
+    case "$(echo "$1" | tr '[:upper:]' '[:lower:]')" in
         clean)   DO_CLEAN=1 ;;
         install) DO_INSTALL=1 ;;
         bridge)  BRIDGE_ONLY=1 ;;
         plugin)  PLUGIN_ONLY=1 ;;
         qt)      DO_QT=1 ;;
+        # Value-taking flags: keep the original-case value (commit SHAs etc.).
+        --channel)   BN_CHANNEL="${2:-}";        shift ;;
+        --channel=*) BN_CHANNEL="${1#*=}" ;;
+        --bn-api)    BN_API_COMMIT_ARG="${2:-}"; shift ;;
+        --bn-api=*)  BN_API_COMMIT_ARG="${1#*=}" ;;
+        *) echo "WARNING: ignoring unknown argument '$1'" ;;
     esac
+    shift
 done
 
 # Explicit single-component flags override the defaults.
 if [[ $BRIDGE_ONLY -eq 1 && $PLUGIN_ONLY -eq 0 ]]; then DO_PLUGIN=0; fi
 if [[ $PLUGIN_ONLY -eq 1 && $BRIDGE_ONLY -eq 0 ]]; then DO_BRIDGE=0; fi
+
+# Resolve the Binary Ninja API commit from --channel / --bn-api.
+# The two are mutually exclusive; with neither, default to the stable channel.
+if [[ -n "$BN_CHANNEL" && -n "$BN_API_COMMIT_ARG" ]]; then
+    echo "ERROR: pass either --channel or --bn-api, not both."
+    exit 1
+fi
+if [[ -n "$BN_API_COMMIT_ARG" ]]; then
+    # Explicit commit — no GitHub lookup.
+    BN_API_COMMIT="$BN_API_COMMIT_ARG"
+    echo "Binary Ninja API: explicit commit $BN_API_COMMIT"
+else
+    _ch="$(echo "${BN_CHANNEL:-stable}" | tr '[:upper:]' '[:lower:]')"
+    echo "Fetching latest '$_ch' binaryninja-api commit from GitHub..."
+    # dev    -> head of the dev branch.
+    # stable -> commit of the latest published 'stable/*' release.
+    case "$_ch" in
+        dev)
+            BN_API_COMMIT=$(curl -fsSL "$BN_API_REPO/commits/dev" \
+                | grep '"sha"' | head -1 | sed -E 's/.*"sha": *"([0-9a-f]{40})".*/\1/')
+            ;;
+        stable)
+            _tag=$(curl -fsSL "$BN_API_REPO/releases/latest" \
+                | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+            BN_API_COMMIT=$(curl -fsSL "$BN_API_REPO/commits/$_tag" \
+                | grep '"sha"' | head -1 | sed -E 's/.*"sha": *"([0-9a-f]{40})".*/\1/')
+            ;;
+        *) echo "ERROR: --channel must be 'stable' or 'dev' (got '$BN_CHANNEL')"; exit 1 ;;
+    esac
+    if [[ ! "$BN_API_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "ERROR: could not fetch the latest '$_ch' binaryninja-api commit from GitHub."
+        echo "       Check your network/curl, or pass --bn-api <commit> explicitly."
+        exit 1
+    fi
+    echo "Binary Ninja API: channel '$_ch' -> commit $BN_API_COMMIT"
+fi
 
 # ---------------------------------------------------------------------------
 # Ensure qt-build submodule is populated (fast — just checks out scripts)
@@ -247,6 +308,7 @@ if [[ $DO_QT -eq 1 ]]; then
         -G Ninja \
         -DQt6_DIR="$Qt6_DIR" \
         -DBN_INSTALL_DIR="$BN_INSTALL" \
+        -DBN_API_COMMIT_OVERRIDE="$BN_API_COMMIT" \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
     echo
     echo "Qt is ready. Re-run ./build.sh to build the plugin."
@@ -267,15 +329,19 @@ fi
 # Build Java bridge
 # ---------------------------------------------------------------------------
 if [[ $DO_BRIDGE -eq 1 ]]; then
-    if ! java -version > /dev/null 2>&1; then
+    # Bridge build needs a JDK; require JAVA_HOME from the environment (Gradle
+    # picks it up automatically). Validate it has a runnable bin/java.
+    if [[ -z "${JAVA_HOME:-}" || ! -x "$JAVA_HOME/bin/java" ]]; then
         echo
         if [[ $BRIDGE_ONLY -eq 1 ]]; then
-            echo "ERROR: Java not found — cannot build bridge JAR."
-            echo "       Install JDK 17+ (e.g. Eclipse Adoptium) and re-run."
+            echo "ERROR: JAVA_HOME is not set (or has no bin/java) — cannot build the bridge JAR."
+            echo "       Set JAVA_HOME to a JDK 17+ install and re-run, e.g.:"
+            echo "         export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home   # macOS"
+            echo "         export JAVA_HOME=/usr/lib/jvm/temurin-21-jdk                                       # Linux"
             exit 1
         else
-            echo "NOTE: Java not found — skipping bridge JAR build."
-            echo "      To build the JAR later: ./build.sh bridge"
+            echo "NOTE: JAVA_HOME is not set (or has no bin/java) — skipping bridge JAR build."
+            echo "      Set JAVA_HOME to a JDK 17+ install, then: ./build.sh bridge"
             echo "      (Java is needed on the build machine to compile the JAR;"
             echo "       it runs on the Ghidra server in remote mode, or locally in local mode.)"
         fi
@@ -374,6 +440,7 @@ if [[ $DO_PLUGIN -eq 1 ]]; then
         -G Ninja \
         -DQt6_DIR="$Qt6_DIR" \
         -DBN_INSTALL_DIR="$BN_INSTALL" \
+        -DBN_API_COMMIT_OVERRIDE="$BN_API_COMMIT" \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
     if [[ $? -ne 0 ]]; then
         echo "ERROR: CMake configure failed."

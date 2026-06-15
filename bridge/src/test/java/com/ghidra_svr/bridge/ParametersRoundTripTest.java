@@ -40,6 +40,7 @@ class ParametersRoundTripTest extends ProgramTestBase {
 
     @Test
     @DisplayName("import: rename existing parameter by symbol key")
+    @SuppressWarnings("deprecation") // Function.addParameter — see ProgramApplier.applyParameters
     void renameParam_byKey() throws Exception {
         ProgramDB p = newProgram();
         long fva = memoryStart() + 0x100;

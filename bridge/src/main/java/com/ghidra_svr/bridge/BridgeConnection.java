@@ -339,31 +339,40 @@ public class BridgeConnection implements Runnable {
 
         ghidra.framework.remote.RepositoryHandle repoHandle = session.getRepo(repo);
 
-        // Reuse an existing checkout by the current user if one is already active
-        // (e.g. from a previous failed terminate), otherwise acquire a new one.
+        // Reuse a *bridge-owned* checkout if one is already active (e.g. a leftover
+        // from a previous failed terminate), otherwise acquire a new one.
+        //
+        // CRITICAL: only ever reuse — and therefore later terminate — checkouts that
+        // THIS bridge created.  A bridge checkout is tagged with the project path
+        // "<host>::binja-ghidra".  Earlier this matched on user alone, which would
+        // grab the user's own interactive Ghidra checkout (same user) and terminate
+        // it on check-in — leaving the user's local Ghidra copy with a dangling
+        // checkout, which Ghidra reports as "hijacked".
+        String bridgeProjectPath = ghidra.framework.store.ItemCheckoutStatus
+                .getProjectPath("binja-ghidra", false);
         long coId = -1;
         String currentUser = session.getConnectedUser();
         ghidra.framework.store.ItemCheckoutStatus[] existing =
                 repoHandle.getCheckouts(folder, item);
         if (existing != null) {
             for (ghidra.framework.store.ItemCheckoutStatus s : existing) {
-                if (currentUser != null && currentUser.equals(s.getUser())) {
+                if (currentUser != null && currentUser.equals(s.getUser())
+                        && bridgeProjectPath.equals(s.getProjectPath())) {
                     coId = s.getCheckoutId();
-                    System.err.println("[ghidra-bridge] reusing checkout_id=" + coId);
+                    System.err.println("[ghidra-bridge] reusing bridge checkout_id=" + coId);
                     break;
                 }
             }
         }
         boolean ownedCheckout = false;
         if (coId == -1) {
-            String projectPath = ghidra.framework.store.ItemCheckoutStatus
-                    .getProjectPath("binja-ghidra", false);
             ghidra.framework.store.ItemCheckoutStatus co =
                     repoHandle.checkout(folder, item,
-                            ghidra.framework.store.CheckoutType.EXCLUSIVE, projectPath);
+                            ghidra.framework.store.CheckoutType.EXCLUSIVE, bridgeProjectPath);
             if (co == null) {
                 throw new java.io.IOException(
-                    "Checkout failed — the item may already be exclusively checked out by another user");
+                    "Checkout failed — the item is already checked out (this may be your "
+                    + "own Ghidra session). Check it in or undo the checkout in Ghidra, then retry.");
             }
             coId = co.getCheckoutId();
             ownedCheckout = true;

@@ -547,6 +547,21 @@ GhidraDbExport GhidraConnection::openDatabase(const std::string& repo,
             }
         }
 
+        if (resp.contains("memory_blocks")) {
+            for (auto& j : resp["memory_blocks"]) {
+                GhidraMemoryBlock mb;
+                mb.name        = j.value("name", std::string{});
+                mb.addr        = parseHexAddr(j.value("addr", std::string{"0x0"}));
+                mb.size        = parseHexAddr(j.value("size", std::string{"0x0"}));
+                mb.read        = j.value("r", true);
+                mb.write       = j.value("w", false);
+                mb.execute     = j.value("x", false);
+                mb.initialized = j.value("initialized", true);
+                mb.overlay     = j.value("overlay", false);
+                out.memoryBlocks.push_back(std::move(mb));
+            }
+        }
+
         if (resp.contains("xref_stats")) {
             auto& xs = resp["xref_stats"];
             out.xrefStats.fromCount = xs.value("from_count", 0);

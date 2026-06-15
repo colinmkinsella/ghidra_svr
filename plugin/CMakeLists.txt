@@ -62,24 +62,34 @@ set_target_properties(Qt6::Core Qt6::Widgets PROPERTIES
 # ---------------------------------------------------------------------------
 include(FetchContent)
 
-# On macOS the app bundle keeps api_REVISION.txt under Contents/Resources/,
-# while BN_INSTALL_DIR points at Contents/MacOS/ (where the dylibs live).
-if(APPLE)
-    file(READ "${BN_INSTALL_DIR}/../Resources/api_REVISION.txt" _bn_rev_raw)
+# The API commit can be forced via -DBN_API_COMMIT_OVERRIDE=<sha> (the build
+# scripts pass this for their --channel / --bn-api flags).  Without it, we fall
+# back to the exact commit recorded by the installed Binary Ninja, so the plugin
+# ABI matches whatever BN is installed.
+if(BN_API_COMMIT_OVERRIDE)
+    set(BN_API_COMMIT "${BN_API_COMMIT_OVERRIDE}")
+    message(STATUS "Binary Ninja API commit (override): ${BN_API_COMMIT}")
 else()
-    file(READ "${BN_INSTALL_DIR}/api_REVISION.txt" _bn_rev_raw)
+    # On macOS the app bundle keeps api_REVISION.txt under Contents/Resources/,
+    # while BN_INSTALL_DIR points at Contents/MacOS/ (where the dylibs live).
+    if(APPLE)
+        file(READ "${BN_INSTALL_DIR}/../Resources/api_REVISION.txt" _bn_rev_raw)
+    else()
+        file(READ "${BN_INSTALL_DIR}/api_REVISION.txt" _bn_rev_raw)
+    endif()
+    # Split into lines, drop blanks, take the last one (the bare SHA-1).
+    string(REGEX MATCHALL "[^\r\n]+" _rev_lines "${_bn_rev_raw}")
+    list(FILTER _rev_lines EXCLUDE REGEX "^$")
+    list(GET _rev_lines -1 BN_API_COMMIT)
+    string(STRIP "${BN_API_COMMIT}" BN_API_COMMIT)
+    message(STATUS "Binary Ninja API commit (from install): ${BN_API_COMMIT}")
 endif()
-# Split into lines, drop blanks, take the last one (the bare SHA-1).
-string(REGEX MATCHALL "[^\r\n]+" _rev_lines "${_bn_rev_raw}")
-list(FILTER _rev_lines EXCLUDE REGEX "^$")
-list(GET _rev_lines -1 BN_API_COMMIT)
-string(STRIP "${BN_API_COMMIT}" BN_API_COMMIT)
 if(NOT BN_API_COMMIT MATCHES "^[0-9a-f]+$")
     message(FATAL_ERROR
-        "Could not parse API commit from ${BN_INSTALL_DIR}/api_REVISION.txt\n"
-        "Got: '${BN_API_COMMIT}'")
+        "Could not determine Binary Ninja API commit.\n"
+        "Got: '${BN_API_COMMIT}'\n"
+        "Pass -DBN_API_COMMIT_OVERRIDE=<sha> or check ${BN_INSTALL_DIR}/api_REVISION.txt")
 endif()
-message(STATUS "Binary Ninja API commit: ${BN_API_COMMIT}")
 
 FetchContent_Declare(binaryninja-api
     GIT_REPOSITORY https://github.com/Vector35/binaryninja-api.git

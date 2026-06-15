@@ -158,6 +158,17 @@ struct GhidraDataItem {
     int64_t  typeId = 0;
 };
 
+struct GhidraMemoryBlock {
+    std::string name;
+    uint64_t    addr        = 0;
+    uint64_t    size        = 0;
+    bool        read        = true;
+    bool        write       = false;
+    bool        execute     = false;
+    bool        initialized = true;
+    bool        overlay     = false; // overlay / non-default address space — skip on apply
+};
+
 struct GhidraXrefStats {
     int fromCount = 0;
     int toCount   = 0;
@@ -267,6 +278,7 @@ struct GhidraDbExport {
     std::vector<GhidraParameter> parameters;
     std::vector<GhidraDataType>  dataTypes;
     std::vector<GhidraDataItem>  dataItems;
+    std::vector<GhidraMemoryBlock> memoryBlocks;
     GhidraXrefStats              xrefStats;
     std::vector<std::string>     diag;      // diagnostic lines from the bridge
     uint64_t                     imageBase = 0; // Ghidra segment-0 base VA

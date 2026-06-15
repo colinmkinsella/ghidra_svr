@@ -236,7 +236,7 @@ public final class ProgramApplier {
             try {
                 if ("delete".equals(op)) {
                     DataType dt = dtm.getDataType(CategoryPath.ROOT, name);
-                    if (dt != null) dtm.remove(dt, TaskMonitor.DUMMY);
+                    if (dt != null) dtm.remove(dt);
                     ++n;
                     continue;
                 }
@@ -411,11 +411,11 @@ public final class ProgramApplier {
             catch (Exception e) { continue; }
 
             try {
-                if (c.has("eol"))   listing.setComment(addr, CodeUnit.EOL_COMMENT,        nullIfEmpty(c.get("eol").getAsString()));
-                if (c.has("pre"))   listing.setComment(addr, CodeUnit.PRE_COMMENT,        nullIfEmpty(c.get("pre").getAsString()));
-                if (c.has("post"))  listing.setComment(addr, CodeUnit.POST_COMMENT,       nullIfEmpty(c.get("post").getAsString()));
-                if (c.has("plate")) listing.setComment(addr, CodeUnit.PLATE_COMMENT,      nullIfEmpty(c.get("plate").getAsString()));
-                if (c.has("rep"))   listing.setComment(addr, CodeUnit.REPEATABLE_COMMENT, nullIfEmpty(c.get("rep").getAsString()));
+                if (c.has("eol"))   listing.setComment(addr, CommentType.EOL,        nullIfEmpty(c.get("eol").getAsString()));
+                if (c.has("pre"))   listing.setComment(addr, CommentType.PRE,        nullIfEmpty(c.get("pre").getAsString()));
+                if (c.has("post"))  listing.setComment(addr, CommentType.POST,       nullIfEmpty(c.get("post").getAsString()));
+                if (c.has("plate")) listing.setComment(addr, CommentType.PLATE,      nullIfEmpty(c.get("plate").getAsString()));
+                if (c.has("rep"))   listing.setComment(addr, CommentType.REPEATABLE, nullIfEmpty(c.get("rep").getAsString()));
                 ++count;
             } catch (Exception ignored) {}
         }
@@ -558,6 +558,11 @@ public final class ProgramApplier {
     // Function parameters
     // -------------------------------------------------------------------------
 
+    // Function.addParameter(Variable, SourceType) is deprecated in favour of
+    // updateFunction(), which rebuilds the entire signature and recomputes all
+    // parameter storage.  For a simple append that is heavier and riskier than the
+    // direct call, so we keep addParameter and suppress the single deprecation here.
+    @SuppressWarnings("deprecation")
     static void applyParameters(ProgramDB program, JsonArray paramRenames) {
         SymbolTable st = program.getSymbolTable();
         FunctionManager fm = program.getFunctionManager();
