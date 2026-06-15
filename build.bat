@@ -469,8 +469,10 @@ if %DO_INSTALL%==1 (
     echo.
     echo ====== Installing ======
 
+    rem Use delayed (!BN_PLUGINS!) expansion below: %BN_PLUGINS% would expand at
+    rem parse time of this if(...) block, before this set runs, i.e. to empty.
     set "BN_PLUGINS=%APPDATA%\Binary Ninja\plugins"
-    if not exist "%BN_PLUGINS%" mkdir "%BN_PLUGINS%"
+    if not exist "!BN_PLUGINS!" mkdir "!BN_PLUGINS!"
 
     rem Install the C++ plugin (and JAR via cmake OPTIONAL install rule) whenever
     rem cmake has already been configured for this build directory.
@@ -493,12 +495,12 @@ if %DO_INSTALL%==1 (
     rem it obvious when the JAR is fresh even if cmake's OPTIONAL rule would silently skip it).
     if %DO_BRIDGE%==1 (
         if exist "%BRIDGE_JAR%" (
-            copy /Y "%BRIDGE_JAR%" "%BN_PLUGINS%\" >nul
-            echo Bridge JAR: %BN_PLUGINS%\ghidra-bridge-0.1.0.jar
+            copy /Y "%BRIDGE_JAR%" "!BN_PLUGINS!" >nul
+            echo Bridge JAR: !BN_PLUGINS!\ghidra-bridge-0.1.0.jar
         )
     )
 
-    echo Installed to: %BN_PLUGINS%\
+    echo Installed to: !BN_PLUGINS!\
 )
 
 echo.

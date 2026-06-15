@@ -312,7 +312,11 @@ public final class ProgramApplier {
                 } else if ("typedef".equals(kind)) {
                     String under = getStr(c, "underlying_type_name", "");
                     DataType underDt = resolveDataType(dtm, under, 0);
-                    if (underDt == null) { ++errors; continue; }
+                    if (underDt == null) {
+                        System.err.println("[ghidra-bridge] typedef '" + name
+                            + "' skipped: cannot resolve underlying type '" + under + "'");
+                        ++errors; continue;
+                    }
                     TypedefDataType t = new TypedefDataType(name, underDt);
                     DataType result = dtm.addDataType(t, DataTypeConflictHandler.REPLACE_HANDLER);
                     if ("add".equals(op) && result != null) added.put(name, dtm.getID(result));
@@ -331,9 +335,35 @@ public final class ProgramApplier {
      *  2. DataTypeParser (handles "int *", "char[5]", "MyStruct **", etc.)
      *  3. Fallback to undefined data type of the right size.
      */
+    // Binary Ninja uses the stdint.h spelling (int32_t, uint8_t, …) which Ghidra's
+    // built-ins do NOT expose, so resolveDataType returns null for them and any
+    // typedef / struct member / parameter typed that way is silently dropped.
+    // Map them to the equivalent Ghidra built-in by width + signedness.  64-bit
+    // assumed for the pointer-width names (size_t etc.) — correct for the common
+    // x86-64 case.
+    private static final Map<String, String> STDINT_TO_GHIDRA = Map.ofEntries(
+        Map.entry("int8_t",    "sbyte"),    Map.entry("uint8_t",   "byte"),
+        Map.entry("int16_t",   "short"),    Map.entry("uint16_t",  "ushort"),
+        Map.entry("int32_t",   "int"),      Map.entry("uint32_t",  "uint"),
+        Map.entry("int64_t",   "longlong"), Map.entry("uint64_t",  "ulonglong"),
+        Map.entry("size_t",    "ulonglong"),Map.entry("ssize_t",   "longlong"),
+        Map.entry("intptr_t",  "longlong"), Map.entry("uintptr_t", "ulonglong"));
+
+    /** Replace a leading stdint base name (e.g. "uint32_t" in "uint32_t *") with
+     *  its Ghidra equivalent, preserving any pointer/array suffix. */
+    private static String normalizePrimitives(String type) {
+        int i = 0;
+        while (i < type.length()
+                && (Character.isLetterOrDigit(type.charAt(i)) || type.charAt(i) == '_')) {
+            i++;
+        }
+        String mapped = STDINT_TO_GHIDRA.get(type.substring(0, i));
+        return mapped != null ? mapped + type.substring(i) : type;
+    }
+
     static DataType resolveDataType(DataTypeManager dtm, String name, int size) {
         if (name == null || name.isEmpty()) return null;
-        String trimmed = name.trim();
+        String trimmed = normalizePrimitives(name.trim());
 
         // Direct hit
         DataType dt = dtm.getDataType(CategoryPath.ROOT, trimmed);

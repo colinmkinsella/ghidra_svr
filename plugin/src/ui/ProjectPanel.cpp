@@ -157,6 +157,28 @@ void ProjectPanel::buildUi() {
     topRow->addWidget(m_disconnectBtn);
     topRow->addWidget(m_refreshBtn);
 
+    // ---- Linked-file banner (hidden until a linked, disconnected view opens) --
+    m_linkBannerLabel = new QLabel(this);
+    m_linkBannerLabel->setWordWrap(true);
+    auto* bannerConnectBtn = new QPushButton("Connect && check", this);  // && = literal &
+    bannerConnectBtn->setToolTip("Connect to the linked Ghidra server and check the item's latest version");
+    auto* bannerDismissBtn = new QPushButton("Dismiss", this);
+    auto* bannerLayout = new QHBoxLayout;
+    bannerLayout->setContentsMargins(6, 4, 6, 4);
+    bannerLayout->addWidget(m_linkBannerLabel, /*stretch=*/1);
+    bannerLayout->addWidget(bannerConnectBtn);
+    bannerLayout->addWidget(bannerDismissBtn);
+    auto* banner = new QFrame(this);
+    banner->setObjectName("ghidraLinkBanner");
+    banner->setStyleSheet(
+        "#ghidraLinkBanner { background-color: rgba(80,120,200,40);"
+        " border: 1px solid rgba(80,120,200,120); border-radius: 4px; }");
+    banner->setLayout(bannerLayout);
+    banner->hide();
+    m_linkBanner = banner;
+    connect(bannerConnectBtn, &QPushButton::clicked, this, [this]() { connectAndCheckLinked(); });
+    connect(bannerDismissBtn, &QPushButton::clicked, this, [this]() { if (m_linkBanner) m_linkBanner->hide(); });
+
     // ---- Project files section (hidden until a project is open) ------------
     auto* projLabel = new QLabel("Project Files", this);
     {
@@ -206,6 +228,7 @@ void ProjectPanel::buildUi() {
     layout->setContentsMargins(4, 4, 4, 4);
     layout->setSpacing(4);
     layout->addLayout(topRow);
+    layout->addWidget(m_linkBanner);
     layout->addWidget(m_projectSection);
     layout->addWidget(repoLabel);
     layout->addWidget(m_repoTree, 1);
@@ -263,6 +286,7 @@ void ProjectPanel::onConnectClicked() {
                 m_statusLabel->setStyleSheet("color: green;");
                 updateConnectionButtons(true);
                 refreshStatus();
+                updateLinkBanner();   // hide if we just connected to the link's server
             } else {
                 m_statusLabel->setText("Connection failed");
                 m_statusLabel->setStyleSheet("color: red;");
@@ -1006,6 +1030,8 @@ void ProjectPanel::onDisconnectClicked() {
             m_statusLabel->setText("Disconnected");
             m_statusLabel->setStyleSheet("color: gray;");
             updateConnectionButtons(false);
+            // Re-offer the banner if the open view is linked.
+            updateLinkBanner();
         }, Qt::QueuedConnection);
     });
 }
@@ -2264,6 +2290,9 @@ void ProjectPanel::notifyViewChanged(ViewFrame* frame) {
     // Rebuild the Project Files panel regardless of link validity.
     scheduleRefreshProjectFiles();
 
+    // Offer to connect if this view is linked but we're not on that server yet.
+    updateLinkBanner();
+
     if (!m_linkedGhidra.valid()) return;
 
     // The file is linked to a Ghidra server item.  Do NOT auto-import or
@@ -2292,4 +2321,96 @@ void ProjectPanel::persistCheckedOutState(bool val) {
     std::map<std::string, BinaryNinja::Ref<BinaryNinja::Metadata>> md(ikv.begin(), ikv.end());
     md["checked_out"] = new BinaryNinja::Metadata(static_cast<uint64_t>(val ? 1 : 0));
     project->StoreMetadata("ghidra.link." + fileId, new BinaryNinja::Metadata(md));
+}
+
+// ---------------------------------------------------------------------------
+// updateLinkBanner — show the "linked to Ghidra" notice when the open view is
+// linked to a server item we are NOT currently connected to.  Hidden once we
+// are connected to that same server, when the view is not linked, or when the
+// user dismisses it.  UI thread only.
+// ---------------------------------------------------------------------------
+void ProjectPanel::updateLinkBanner() {
+    if (!m_linkBanner) return;
+
+    auto& conn = GhidraConnection::instance();
+    bool connectedToLink = conn.isServerConnected()
+        && QString::fromStdString(conn.connectedHost()) == m_linkedGhidra.host
+        && conn.connectedPort() == m_linkedGhidra.port
+        && QString::fromStdString(conn.connectedUser()) == m_linkedGhidra.user;
+
+    if (m_linkedGhidra.valid() && !connectedToLink) {
+        m_linkBannerLabel->setText(
+            QString("This view is linked to Ghidra: %1@%2:%3 — %4/%5. "
+                    "Connect to check for newer versions.")
+                .arg(m_linkedGhidra.user, m_linkedGhidra.host)
+                .arg(m_linkedGhidra.port)
+                .arg(m_linkedGhidra.repo, m_linkedGhidra.item));
+        m_linkBanner->show();
+    } else {
+        m_linkBanner->hide();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// connectAndCheckLinked — banner action.  Opens the Connect dialog preloaded
+// with the linked file's host/port/user, connects, and reports the linked
+// item's latest version on the server so the user can see whether the server
+// copy has advanced past their local one.
+// ---------------------------------------------------------------------------
+void ProjectPanel::connectAndCheckLinked() {
+    if (!m_linkedGhidra.valid()) return;
+
+    ConnectDialog dlg(this);
+    dlg.preload(m_linkedGhidra.host, m_linkedGhidra.port, m_linkedGhidra.user);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    QString host = dlg.host();
+    int     port = dlg.port();
+    QString user = dlg.user();
+    QString password = dlg.password();
+    QString repo   = m_linkedGhidra.repo;
+    QString folder = m_linkedGhidra.folder;
+    QString item   = m_linkedGhidra.item;
+
+    m_statusLabel->setText("Connecting…");
+    m_connectBtn->setEnabled(false);
+
+    BinaryNinja::WorkerEnqueue([this, host, port, user, password, repo, folder, item]() mutable {
+        std::string err;
+        bool ok = GhidraConnection::instance().connectToServer(
+            host.toStdString(), port, user.toStdString(), password.toStdString(), err);
+
+        std::vector<VersionInfo> versions;
+        if (ok) {
+            std::string verr;
+            versions = GhidraConnection::instance().getVersions(
+                repo.toStdString(), folder.toStdString(), item.toStdString(), verr);
+        }
+
+        QMetaObject::invokeMethod(this, [this, ok, errStr = QString::fromStdString(err),
+                                         user, item, versions]() {
+            if (ok) {
+                m_statusLabel->setText("Connected as " + user);
+                m_statusLabel->setStyleSheet("color: green;");
+                updateConnectionButtons(true);
+                refreshStatus();
+                if (!versions.empty()) {
+                    const VersionInfo& v = versions.back();
+                    addActivityEntry(
+                        QString("'%1' latest on server: v%2 by %3 — %4")
+                            .arg(item).arg(v.version)
+                            .arg(QString::fromStdString(v.user),
+                                 QString::fromStdString(v.comment)));
+                } else {
+                    addActivityEntry(QString("Connected — could not read '%1' version history.").arg(item));
+                }
+                updateLinkBanner();   // we're now connected to the link server → hides
+            } else {
+                m_statusLabel->setText("Connection failed");
+                m_statusLabel->setStyleSheet("color: red;");
+                updateConnectionButtons(false);
+                logError(errStr);
+            }
+        }, Qt::QueuedConnection);
+    });
 }

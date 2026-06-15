@@ -70,6 +70,11 @@ private:
     QTreeWidget*  m_projectTree       = nullptr;
     QTreeWidget*  m_repoTree          = nullptr;
 
+    /// Non-blocking notice shown when the open view is linked to a Ghidra item
+    /// but we are not connected to that server — offers "Connect & check".
+    QWidget*      m_linkBanner        = nullptr;
+    QLabel*       m_linkBannerLabel   = nullptr;
+
     /// Debounce timer: coalesces rapid refreshProjectFiles() calls into one.
     QTimer*       m_refreshTimer      = nullptr;
     /// Debounce timer: coalesces rapid refreshStatus() calls into one.
@@ -103,6 +108,11 @@ private:
 
     /** Assign m_checkedOut and persist the value to project metadata. UI thread only. */
     void persistCheckedOutState(bool val);
+    /** Show/hide the "linked to Ghidra" banner based on link + connection state. */
+    void updateLinkBanner();
+    /** Banner action: connect to the linked file's server (credentials preloaded)
+     *  and report the linked item's latest version on the server. */
+    void connectAndCheckLinked();
     /**
      * Debounced wrapper around refreshStatus(): coalesces multiple rapid calls
      * (e.g. from repeated notifyViewChanged() firings during analysis) into a
