@@ -31,6 +31,7 @@
 #include <QMetaObject>
 #include <QPointer>
 #include <QPushButton>
+#include <QListWidget>
 #include <QTableWidget>
 #include <QTreeWidget>
 #include <QTimer>
@@ -222,6 +223,8 @@ void ProjectPanel::buildUi() {
     m_repoTree = new QTreeWidget(this);
     m_repoTree->setHeaderLabel("Repository");
     m_repoTree->setAnimated(true);
+    // Allow Ctrl/Shift multi-select so several items can be added to a project at once.
+    m_repoTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
 
     // ---- Root layout -------------------------------------------------------
     auto* layout = new QVBoxLayout(this);
@@ -299,7 +302,26 @@ void ProjectPanel::onConnectClicked() {
 
 void ProjectPanel::onTreeContextMenu(const QPoint& pos) {
     auto* item = m_repoTree->itemAt(pos);
-    if (!item || item->data(0, Qt::UserRole).toString() != "item") return;
+    if (!item) return;
+
+    QString clickedKind = item->data(0, Qt::UserRole).toString();
+
+    // Repo / folder node: offer "New project from items here…".  (Items don't
+    // store role+2 for a repo, so default the folder to "/" there.)
+    if (clickedKind == "repo" || clickedKind == "folder") {
+        QString repo   = item->data(0, Qt::UserRole + 1).toString();
+        QString folder = (clickedKind == "folder")
+                       ? item->data(0, Qt::UserRole + 2).toString() : QString("/");
+        if (folder.isEmpty()) folder = "/";
+        QString label  = item->text(0);
+        QMenu menu;
+        menu.addAction(QString("New project from items in '%1'…").arg(label),
+            [this, repo, folder, label]() { createProjectFromNode(repo, folder, label); });
+        menu.exec(m_repoTree->viewport()->mapToGlobal(pos));
+        return;
+    }
+
+    if (clickedKind != "item") return;
 
     QString repo   = item->data(0, Qt::UserRole + 1).toString();
     QString folder = item->data(0, Qt::UserRole + 2).toString();
@@ -324,6 +346,30 @@ void ProjectPanel::onTreeContextMenu(const QPoint& pos) {
     // QMenu were a child of this widget, Qt's deleteChildren() would try to
     // `delete` the stack-allocated menu → crash (pointer-not-allocated abort).
     QMenu menu;
+
+    // Bulk "Add to project" — gather every selected repo item (Ctrl/Shift select),
+    // always including the right-clicked one.  Only offered when a project is open.
+    if (currentOpenProject(m_currentView)) {
+        std::vector<RepoItemRef> selected;
+        auto addRef = [&](QTreeWidgetItem* it) {
+            if (!it || it->data(0, Qt::UserRole).toString() != "item") return;
+            RepoItemRef r{ it->data(0, Qt::UserRole + 1).toString(),
+                           it->data(0, Qt::UserRole + 2).toString(),
+                           it->data(0, Qt::UserRole + 3).toString() };
+            for (const auto& e : selected)
+                if (e.repo == r.repo && e.folder == r.folder && e.name == r.name) return;
+            selected.push_back(std::move(r));
+        };
+        for (auto* sel : m_repoTree->selectedItems()) addRef(sel);
+        addRef(item);  // ensure the clicked item is included
+
+        if (!selected.empty()) {
+            menu.addAction(QString("Add %1 item(s) to project").arg(selected.size()),
+                [this, selected]() { bulkAddItemsToProject(selected); });
+            menu.addSeparator();
+        }
+    }
+
     if (effectivelyCheckedOut) {
         menu.addAction("Check In…", [this]() { doCheckin(); });
         // Always expose a way to release the checkout without checking in.
@@ -1274,6 +1320,301 @@ void ProjectPanel::addItemToProject(const QString& repo,
             if (auto* ctx = UIContext::activeContext())
                 ctx->openFilename(QString::fromStdString(filePath));
             // notifyViewChanged fires when BN opens the view and reads the link metadata.
+        }, Qt::QueuedConnection);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// bulkAddItemsToProject — download every selected item and add it to the
+// current BN project WITHOUT opening it, storing the per-file link metadata.
+// Items already in the project are skipped.  All metadata writes happen on the
+// UI thread; downloads + CreateFileFromPath run on a single background worker.
+// ---------------------------------------------------------------------------
+void ProjectPanel::bulkAddItemsToProject(const std::vector<RepoItemRef>& items) {
+    auto project = currentOpenProject(m_currentView);
+    if (!project) {
+        addActivityEntry("No BN project is open — create one first (File → New Project).");
+        return;
+    }
+    if (items.empty()) return;
+
+    // Collect the (repo,folder,item) keys already linked in the project.
+    std::vector<std::string> existing;
+    for (const auto& pf : project->GetFiles()) {
+        auto lm = project->QueryMetadata("ghidra.link." + pf->GetId());
+        if (!lm || !lm->IsKeyValueStore()) continue;
+        auto kv = lm->GetKeyValueStore();
+        auto get = [&](const std::string& k) {
+            auto it = kv.find(k);
+            return (it != kv.end() && it->second->IsString()) ? it->second->GetString() : std::string();
+        };
+        existing.push_back(get("repo") + "\n" + get("folder") + "\n" + get("item"));
+    }
+
+    struct Pending { std::string repo, folder, name; };
+    std::vector<Pending> todo;
+    for (const auto& r : items) {
+        std::string key = r.repo.toStdString() + "\n" + r.folder.toStdString()
+                        + "\n" + r.name.toStdString();
+        bool present = false;
+        for (const auto& e : existing) if (e == key) { present = true; break; }
+        if (!present)
+            todo.push_back({ r.repo.toStdString(), r.folder.toStdString(), r.name.toStdString() });
+    }
+    int skipped = static_cast<int>(items.size()) - static_cast<int>(todo.size());
+    if (todo.empty()) {
+        addActivityEntry(QString("All %1 selected item(s) are already in the project.")
+                             .arg(items.size()));
+        return;
+    }
+    addActivityEntry(QString("Adding %1 item(s) to project%2…")
+        .arg(todo.size())
+        .arg(skipped > 0 ? QString(" (%1 already present)").arg(skipped) : QString()));
+
+    auto& conn = GhidraConnection::instance();
+    std::string host = conn.connectedHost();
+    uint64_t    port = static_cast<uint64_t>(conn.connectedPort());
+    std::string user = conn.connectedUser();
+
+    BinaryNinja::WorkerEnqueue([this, project, todo, host, port, user]() {
+        struct Added { std::string fileId, repo, folder, name; };
+        std::vector<Added> added;
+        int failed = 0;
+
+        for (const auto& it : todo) {
+            std::string err;
+            auto files = GhidraConnection::instance().downloadBinary(
+                it.repo, it.folder, it.name, -1, err);
+            if (!err.empty() || files.empty()) {
+                ++failed;
+                QString n = QString::fromStdString(it.name);
+                QString e = err.empty() ? QString("no binary data") : QString::fromStdString(err);
+                QMetaObject::invokeMethod(this, [this, n, e]() {
+                    logError(QString("Skipped '%1': %2").arg(n, e));
+                }, Qt::QueuedConnection);
+                continue;
+            }
+
+            const GhidraConnection::BinaryFile* chosen = &files[0];
+            for (const auto& f : files)
+                if (QString::fromStdString(f.filename)
+                        .compare(QString::fromStdString(it.name), Qt::CaseInsensitive) == 0)
+                    { chosen = &f; break; }
+
+            QString tmpPath = QDir::temp().filePath(QString::fromStdString(it.name));
+            {
+                QFile f(tmpPath);
+                if (!f.open(QIODevice::WriteOnly)) { ++failed; continue; }
+                f.write(reinterpret_cast<const char*>(chosen->bytes.data()),
+                        static_cast<qint64>(chosen->bytes.size()));
+            }
+            auto projectFile = project->CreateFileFromPath(
+                tmpPath.toStdString(), /*folder=*/nullptr, it.name,
+                "Ghidra: " + it.repo + "/" + it.folder + "/" + it.name);
+            QFile::remove(tmpPath);
+            if (!projectFile) { ++failed; continue; }
+
+            added.push_back({ projectFile->GetId(), it.repo, it.folder, it.name });
+        }
+
+        QMetaObject::invokeMethod(this, [this, project, added, failed, host, port, user]() {
+            if (!added.empty() && !project->QueryMetadata("ghidra.server")) {
+                std::map<std::string, BinaryNinja::Ref<BinaryNinja::Metadata>> md;
+                md["host"] = new BinaryNinja::Metadata(host);
+                md["port"] = new BinaryNinja::Metadata(port);
+                md["user"] = new BinaryNinja::Metadata(user);
+                project->StoreMetadata("ghidra.server", new BinaryNinja::Metadata(md));
+            }
+            for (const auto& a : added) {
+                std::map<std::string, BinaryNinja::Ref<BinaryNinja::Metadata>> md;
+                md["repo"]   = new BinaryNinja::Metadata(a.repo);
+                md["folder"] = new BinaryNinja::Metadata(a.folder);
+                md["item"]   = new BinaryNinja::Metadata(a.name);
+                project->StoreMetadata("ghidra.link." + a.fileId, new BinaryNinja::Metadata(md));
+            }
+            scheduleRefreshProjectFiles();
+            addActivityEntry(QString("Bulk add complete: %1 added%2.")
+                .arg(static_cast<int>(added.size()))
+                .arg(failed > 0 ? QString(", %1 failed").arg(failed) : QString()));
+        }, Qt::QueuedConnection);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// populateProjectWithItems — download each item, add it to `project` (root
+// folder), store the server + per-file link metadata, then run onDone on the
+// UI thread.  Shared by the new-project flow below.
+// ---------------------------------------------------------------------------
+void ProjectPanel::populateProjectWithItems(
+        BinaryNinja::Ref<BinaryNinja::Project> project,
+        std::vector<RepoItemRef> items,
+        std::function<void(int, int)> onDone) {
+    if (!project || items.empty()) { if (onDone) onDone(0, 0); return; }
+
+    auto& conn = GhidraConnection::instance();
+    std::string host = conn.connectedHost();
+    uint64_t    port = static_cast<uint64_t>(conn.connectedPort());
+    std::string user = conn.connectedUser();
+
+    BinaryNinja::WorkerEnqueue([this, project, items, host, port, user, onDone]() {
+        struct Added { std::string fileId, repo, folder, name; };
+        std::vector<Added> added;
+        int failed = 0;
+
+        for (const auto& r : items) {
+            std::string repo = r.repo.toStdString();
+            std::string folder = r.folder.toStdString();
+            std::string name = r.name.toStdString();
+
+            std::string err;
+            auto files = GhidraConnection::instance().downloadBinary(repo, folder, name, -1, err);
+            if (!err.empty() || files.empty()) {
+                ++failed;
+                QString n = r.name;
+                QString e = err.empty() ? QString("no binary data") : QString::fromStdString(err);
+                QMetaObject::invokeMethod(this, [this, n, e]() {
+                    logError(QString("Skipped '%1': %2").arg(n, e));
+                }, Qt::QueuedConnection);
+                continue;
+            }
+            const GhidraConnection::BinaryFile* chosen = &files[0];
+            for (const auto& f : files)
+                if (QString::fromStdString(f.filename).compare(r.name, Qt::CaseInsensitive) == 0)
+                    { chosen = &f; break; }
+
+            QString tmpPath = QDir::temp().filePath(r.name);
+            {
+                QFile f(tmpPath);
+                if (!f.open(QIODevice::WriteOnly)) { ++failed; continue; }
+                f.write(reinterpret_cast<const char*>(chosen->bytes.data()),
+                        static_cast<qint64>(chosen->bytes.size()));
+            }
+            auto pf = project->CreateFileFromPath(
+                tmpPath.toStdString(), /*folder=*/nullptr, name,
+                "Ghidra: " + repo + "/" + folder + "/" + name);
+            QFile::remove(tmpPath);
+            if (!pf) { ++failed; continue; }
+            added.push_back({ pf->GetId(), repo, folder, name });
+        }
+
+        QMetaObject::invokeMethod(this, [this, project, added, failed, host, port, user, onDone]() {
+            if (!added.empty() && !project->QueryMetadata("ghidra.server")) {
+                std::map<std::string, BinaryNinja::Ref<BinaryNinja::Metadata>> md;
+                md["host"] = new BinaryNinja::Metadata(host);
+                md["port"] = new BinaryNinja::Metadata(port);
+                md["user"] = new BinaryNinja::Metadata(user);
+                project->StoreMetadata("ghidra.server", new BinaryNinja::Metadata(md));
+            }
+            for (const auto& a : added) {
+                std::map<std::string, BinaryNinja::Ref<BinaryNinja::Metadata>> md;
+                md["repo"]   = new BinaryNinja::Metadata(a.repo);
+                md["folder"] = new BinaryNinja::Metadata(a.folder);
+                md["item"]   = new BinaryNinja::Metadata(a.name);
+                project->StoreMetadata("ghidra.link." + a.fileId, new BinaryNinja::Metadata(md));
+            }
+            if (onDone) onDone(static_cast<int>(added.size()), failed);
+        }, Qt::QueuedConnection);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// createProjectFromNode — enumerate items under a repo/folder, let the user
+// pick which to include, create a new BN project, populate it, and open it.
+// ---------------------------------------------------------------------------
+void ProjectPanel::createProjectFromNode(const QString& repo, const QString& folder,
+                                          const QString& label) {
+    if (!GhidraConnection::instance().isServerConnected()) {
+        addActivityEntry("Connect to the Ghidra server first.");
+        return;
+    }
+    addActivityEntry(QString("Enumerating items in '%1'…").arg(label));
+
+    std::string repoS = repo.toStdString();
+    std::string folderS = folder.toStdString();
+
+    BinaryNinja::WorkerEnqueue([this, repoS, folderS, label]() {
+        // Recursively collect every item under repo/folder.
+        std::vector<RepoItemRef> found;
+        std::vector<std::string> queue{ folderS };
+        auto& conn = GhidraConnection::instance();
+        std::string err;
+        conn.openRepo(repoS, err);
+        while (!queue.empty()) {
+            std::string f = queue.back(); queue.pop_back();
+            for (const auto& it : conn.listItems(repoS, f, err))
+                found.push_back({ QString::fromStdString(repoS),
+                                  QString::fromStdString(it.parentPath),
+                                  QString::fromStdString(it.name) });
+            for (const auto& sf : conn.getSubfolders(repoS, f, err))
+                queue.push_back((f == "/" ? std::string("/") : f) + sf + "/");
+        }
+
+        QMetaObject::invokeMethod(this, [this, found, label]() {
+            if (found.empty()) {
+                addActivityEntry(QString("No items found under '%1'.").arg(label));
+                return;
+            }
+
+            // ---- Checklist dialog: pick which items to include ----
+            QDialog dlg(this);
+            dlg.setWindowTitle(QString("New project from '%1'").arg(label));
+            auto* dlgLayout = new QVBoxLayout(&dlg);
+            dlgLayout->addWidget(new QLabel(
+                QString("Select the items to include (%1 found):").arg(found.size()), &dlg));
+            auto* list = new QListWidget(&dlg);
+            for (const auto& r : found) {
+                QString text = (r.folder == "/" ? QString() : r.folder) + r.name;
+                auto* li = new QListWidgetItem(text, list);
+                li->setFlags(li->flags() | Qt::ItemIsUserCheckable);
+                li->setCheckState(Qt::Checked);
+            }
+            dlgLayout->addWidget(list, 1);
+            auto* selRow = new QHBoxLayout;
+            auto* allBtn  = new QPushButton("Select all",  &dlg);
+            auto* noneBtn = new QPushButton("Select none", &dlg);
+            selRow->addWidget(allBtn); selRow->addWidget(noneBtn); selRow->addStretch(1);
+            dlgLayout->addLayout(selRow);
+            connect(allBtn, &QPushButton::clicked, &dlg, [list]() {
+                for (int i = 0; i < list->count(); ++i) list->item(i)->setCheckState(Qt::Checked); });
+            connect(noneBtn, &QPushButton::clicked, &dlg, [list]() {
+                for (int i = 0; i < list->count(); ++i) list->item(i)->setCheckState(Qt::Unchecked); });
+            auto* buttons = new QDialogButtonBox(
+                QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+            buttons->button(QDialogButtonBox::Ok)->setText("Create Project…");
+            dlgLayout->addWidget(buttons);
+            connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+            connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+            if (dlg.exec() != QDialog::Accepted) return;
+
+            std::vector<RepoItemRef> chosen;
+            for (int i = 0; i < list->count(); ++i)
+                if (list->item(i)->checkState() == Qt::Checked) chosen.push_back(found[i]);
+            if (chosen.empty()) { addActivityEntry("No items selected."); return; }
+
+            // ---- Choose where to save the new project ----
+            QString path = QFileDialog::getSaveFileName(
+                this, "Create Binary Ninja Project",
+                QDir::home().filePath(label + ".bnpr"),
+                "Binary Ninja Project (*.bnpr)");
+            if (path.isEmpty()) return;
+
+            QString projName = QFileInfo(path).completeBaseName();
+            auto project = BinaryNinja::Project::CreateProject(
+                path.toStdString(), projName.toStdString());
+            if (!project) { logError("Failed to create the BN project at " + path); return; }
+            if (!project->IsOpen()) project->Open();
+
+            addActivityEntry(QString("Creating project '%1' with %2 item(s)…")
+                .arg(projName).arg(chosen.size()));
+
+            populateProjectWithItems(project, std::move(chosen),
+                [this, path, projName](int added, int failed) {
+                    addActivityEntry(QString("Project '%1': %2 item(s) added%3 — opening.")
+                        .arg(projName).arg(added)
+                        .arg(failed > 0 ? QString(", %1 failed").arg(failed) : QString()));
+                    if (auto* ctx = UIContext::activeContext())
+                        ctx->openProject(path);
+                });
         }, Qt::QueuedConnection);
     });
 }

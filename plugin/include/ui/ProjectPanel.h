@@ -140,6 +140,30 @@ private:
      * if no project is open.
      */
     void addItemToProject(const QString& repo, const QString& folder, const QString& name);
+    /** A Ghidra repository item, used for the multi-select bulk add. */
+    struct RepoItemRef { QString repo, folder, name; };
+    /**
+     * Download each selected Ghidra item and add it to the current BN project
+     * WITHOUT opening it, storing the per-file "ghidra.link.<fileId>" metadata.
+     * Skips items already present.  Backs the "Add N items to project" action.
+     */
+    void bulkAddItemsToProject(const std::vector<RepoItemRef>& items);
+    /**
+     * Core of the bulk/new-project add: on a background worker, download each
+     * item and add it to @p project (root folder), store "ghidra.server" +
+     * "ghidra.link.<fileId>" metadata, then run @p onDone(added, failed) on the
+     * UI thread.  Items already present are the caller's responsibility to skip.
+     */
+    void populateProjectWithItems(BinaryNinja::Ref<BinaryNinja::Project> project,
+                                  std::vector<RepoItemRef> items,
+                                  std::function<void(int added, int failed)> onDone);
+    /**
+     * Context action from a repo/folder node: recursively enumerate its items,
+     * show a checklist to pick which ones, then create a NEW BN project at a
+     * user-chosen path, populate it with the selected items, and open it.
+     */
+    void createProjectFromNode(const QString& repo, const QString& folder,
+                               const QString& label);
     QTreeWidgetItem* findTreeItem(const QString& repo, const QString& folder,
                                   const QString& name) const;
     void setItemCheckedOut(QTreeWidgetItem* item, bool checkedOut);
