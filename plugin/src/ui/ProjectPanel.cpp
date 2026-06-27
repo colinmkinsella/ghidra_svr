@@ -78,6 +78,18 @@ currentOpenProject(BinaryNinja::Ref<BinaryNinja::BinaryView> view)
     return nullptr;
 }
 
+/**
+ * Resolve a UIContext that can open files when invoked from the sidebar.  On the
+ * start page UIContext::activeContext() is often null, which silently no-ops file
+ * opens — prefer the context that owns the sidebar widget, then fall back.
+ */
+static UIContext* resolveUIContext(QWidget* w) {
+    if (UIContext* c = UIContext::contextForWidget(w)) return c;
+    if (UIContext* c = UIContext::activeContext())      return c;
+    auto all = UIContext::allContexts();
+    return all.empty() ? nullptr : *all.begin();
+}
+
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
@@ -346,6 +358,13 @@ void ProjectPanel::onTreeContextMenu(const QPoint& pos) {
     // QMenu were a child of this widget, Qt's deleteChildren() would try to
     // `delete` the stack-allocated menu → crash (pointer-not-allocated abort).
     QMenu menu;
+    menu.setToolTipsVisible(true);
+
+    // Primary action: open this item — its linked local copy if we have one,
+    // otherwise the "Open existing file / Download from Ghidra" chooser.  Same
+    // path as double-clicking the item.
+    menu.addAction("Open", [this, item]() { onRepoItemDoubleClicked(item, 0); });
+    menu.addSeparator();
 
     // Bulk "Add to project" — gather every selected repo item (Ctrl/Shift select),
     // always including the right-clicked one.  Only offered when a project is open.
@@ -421,6 +440,11 @@ void ProjectPanel::onTreeContextMenu(const QPoint& pos) {
             importItem(repo.toStdString(), folder.toStdString(), name.toStdString());
         });
         checkOutAct->setEnabled(!!m_currentView);
+        if (!m_currentView)
+            checkOutAct->setToolTip(
+                "Open this binary in Binary Ninja first (double-click the item, or "
+                "use 'Open existing file' / 'Download from Ghidra'), then Check Out "
+                "to pull Ghidra's analysis into the open view.");
     }
 
     menu.addSeparator();
@@ -1719,8 +1743,10 @@ void ProjectPanel::openItemIntoNewView(const QString& repo,
             this, "Open File — " + name, QString(),
             "Binary Ninja Database (*.bndb);;All Files (*)");
         if (path.isEmpty()) return;
-        auto* ctx = UIContext::activeContext();
-        if (ctx) ctx->openFilename(path);
+        auto* ctx = resolveUIContext(this);
+        if (!ctx) { logError("No Binary Ninja window is available to open the file."); return; }
+        if (!ctx->openFilename(path))
+            logError("Binary Ninja could not open: " + path);
 
     } else if (choice == 2) {
         // Download the binary from the Ghidra server and open it.
@@ -1784,8 +1810,10 @@ void ProjectPanel::openItemIntoNewView(const QString& repo,
                     .arg(chosen->bytes.size())
                     .arg(savePath));
 
-                auto* ctx = UIContext::activeContext();
-                if (ctx) ctx->openFilename(savePath);
+                auto* ctx = resolveUIContext(this);
+                if (!ctx) { logError("No Binary Ninja window is available to open the file."); return; }
+                if (!ctx->openFilename(savePath))
+                    logError("Binary Ninja could not open: " + savePath);
             }, Qt::QueuedConnection);
         });
     }
