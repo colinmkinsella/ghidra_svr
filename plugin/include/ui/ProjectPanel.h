@@ -133,6 +133,16 @@ private:
     void downloadBinary(const QString& repo, const QString& folder, const QString& name);
     void openItemIntoNewView(const QString& repo, const QString& folder, const QString& name);
     /**
+     * Persistent (QSettings-backed, keyed by server host:port + repo path) map
+     * from a Ghidra item to the local file the user last opened for it, so
+     * "Open" reuses the associated .bndb instead of prompting every time.
+     * Stored in the OS settings store (registry / plist) — no file to manage.
+     */
+    static QString recordedPathForItem(const QString& repo, const QString& folder,
+                                       const QString& name);
+    static void    recordPathForItem(const QString& repo, const QString& folder,
+                                     const QString& name, const QString& path);
+    /**
      * Project-aware double-click handler: checks whether @p repo/@p folder/@p name
      * already exists in the open BN project (opens it), or downloads the binary,
      * adds it to the project, stores Ghidra link metadata, and opens it so that

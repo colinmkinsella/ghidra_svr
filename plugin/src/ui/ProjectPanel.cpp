@@ -31,6 +31,7 @@
 #include <QMetaObject>
 #include <QPointer>
 #include <QPushButton>
+#include <QSettings>
 #include <QListWidget>
 #include <QTableWidget>
 #include <QTreeWidget>
@@ -88,6 +89,32 @@ static UIContext* resolveUIContext(QWidget* w) {
     if (UIContext* c = UIContext::activeContext())      return c;
     auto all = UIContext::allContexts();
     return all.empty() ? nullptr : *all.begin();
+}
+
+// ---------------------------------------------------------------------------
+// Item → local-file association (QSettings-backed).
+// Key includes the connected server host:port so the same repo/item name on
+// two servers can't collide.  '/' in the key just nests QSettings groups.
+// ---------------------------------------------------------------------------
+static QString itemSettingsKey(const QString& repo, const QString& folder,
+                               const QString& name) {
+    auto& conn = GhidraConnection::instance();
+    return QString("links/%1_%2/%3/%4/%5")
+        .arg(QString::fromStdString(conn.connectedHost()))
+        .arg(conn.connectedPort())
+        .arg(repo, folder, name);
+}
+
+QString ProjectPanel::recordedPathForItem(const QString& repo, const QString& folder,
+                                          const QString& name) {
+    QSettings s("binja-ghidra", "item-links");
+    return s.value(itemSettingsKey(repo, folder, name)).toString();
+}
+
+void ProjectPanel::recordPathForItem(const QString& repo, const QString& folder,
+                                     const QString& name, const QString& path) {
+    QSettings s("binja-ghidra", "item-links");
+    s.setValue(itemSettingsKey(repo, folder, name), path);
 }
 
 // ---------------------------------------------------------------------------
@@ -362,8 +389,27 @@ void ProjectPanel::onTreeContextMenu(const QPoint& pos) {
 
     // Primary action: open this item — its linked local copy if we have one,
     // otherwise the "Open existing file / Download from Ghidra" chooser.  Same
-    // path as double-clicking the item.
-    menu.addAction("Open", [this, item]() { onRepoItemDoubleClicked(item, 0); });
+    // path as double-clicking the item.  Greyed out once the item is already
+    // open in the current view (via link metadata or the remembered path).
+    bool alreadyOpen = false;
+    if (m_currentView) {
+        if (linkedHere) {
+            alreadyOpen = true;
+        } else {
+            QString rec = recordedPathForItem(repo, folder, name);
+            if (!rec.isEmpty()) {
+                QString cur = QString::fromStdString(
+                    m_currentView->GetFile()->GetFilename());
+                alreadyOpen = (cur == rec || cur == rec + ".bndb");
+            }
+        }
+    }
+    auto* openAct = menu.addAction("Open", [this, item]() {
+        onRepoItemDoubleClicked(item, 0);
+    });
+    openAct->setEnabled(!alreadyOpen);
+    if (alreadyOpen)
+        openAct->setToolTip("Already open in the current view.");
     menu.addSeparator();
 
     // Bulk "Add to project" — gather every selected repo item (Ctrl/Shift select),
@@ -1708,6 +1754,29 @@ void ProjectPanel::openItemIntoNewView(const QString& repo,
                                         const QString& folder,
                                         const QString& name)
 {
+    // Reuse the file the user associated with this item last time instead of
+    // prompting again.  Prefer a .bndb sibling if one has appeared since (BN
+    // saves databases as <file>.bndb next to the original binary).
+    {
+        QString rec = recordedPathForItem(repo, folder, name);
+        if (!rec.isEmpty()) {
+            QString candidate;
+            if (QFileInfo::exists(rec + ".bndb"))  candidate = rec + ".bndb";
+            else if (QFileInfo::exists(rec))       candidate = rec;
+            if (!candidate.isEmpty()) {
+                if (auto* ctx = resolveUIContext(this)) {
+                    addActivityEntry(QString("Opening '%1' → %2").arg(name, candidate));
+                    if (ctx->openFilename(candidate)) return;
+                    logError("Could not open remembered file: " + candidate);
+                }
+            } else {
+                addActivityEntry(QString(
+                    "The file previously associated with '%1' no longer exists — "
+                    "choose it again.").arg(name));
+            }
+        }
+    }
+
     // Offer the user a choice: open a local file they already have, or
     // download the binary from the Ghidra server and open that.
     QDialog dlg(this);
@@ -1745,8 +1814,12 @@ void ProjectPanel::openItemIntoNewView(const QString& repo,
         if (path.isEmpty()) return;
         auto* ctx = resolveUIContext(this);
         if (!ctx) { logError("No Binary Ninja window is available to open the file."); return; }
-        if (!ctx->openFilename(path))
+        if (!ctx->openFilename(path)) {
             logError("Binary Ninja could not open: " + path);
+        } else {
+            // Remember the association so "Open" goes straight here next time.
+            recordPathForItem(repo, folder, name, path);
+        }
 
     } else if (choice == 2) {
         // Download the binary from the Ghidra server and open it.
@@ -1758,14 +1831,15 @@ void ProjectPanel::openItemIntoNewView(const QString& repo,
         std::string folderStr = folder.toStdString();
         std::string nameStr   = name.toStdString();
 
-        BinaryNinja::WorkerEnqueue([this, repoStr, folderStr, nameStr, savePath]() {
+        BinaryNinja::WorkerEnqueue([this, repoStr, folderStr, nameStr, savePath,
+                                    repo, folder, name]() {
             std::string err;
             auto files = GhidraConnection::instance().downloadBinary(
                 repoStr, folderStr, nameStr, -1, err);
 
             QMetaObject::invokeMethod(this, [this, files = std::move(files),
                                               errStr = QString::fromStdString(err),
-                                              savePath]() mutable {
+                                              savePath, repo, folder, name]() mutable {
                 if (!errStr.isEmpty()) {
                     logError("Download failed: " + errStr);
                     return;
@@ -1812,8 +1886,13 @@ void ProjectPanel::openItemIntoNewView(const QString& repo,
 
                 auto* ctx = resolveUIContext(this);
                 if (!ctx) { logError("No Binary Ninja window is available to open the file."); return; }
-                if (!ctx->openFilename(savePath))
+                if (!ctx->openFilename(savePath)) {
                     logError("Binary Ninja could not open: " + savePath);
+                } else {
+                    // Remember the downloaded file; the fast path upgrades to
+                    // its .bndb automatically once the user saves one.
+                    recordPathForItem(repo, folder, name, savePath);
+                }
             }, Qt::QueuedConnection);
         });
     }
