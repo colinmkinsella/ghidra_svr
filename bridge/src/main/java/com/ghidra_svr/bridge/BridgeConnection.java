@@ -388,12 +388,12 @@ public class BridgeConnection implements Runnable {
                 + " data_items=" + dataItemChanges.size()
                 + " func_sigs=" + funcSigChanges.size());
 
-        java.util.Map<String, Long> addedTypeIds = new java.util.HashMap<>();
+        JsonObject applyResult = new JsonObject();
         try {
             // 3-arg openDatabase opens in write mode for the given checkout.
             db.buffers.ManagedBufferFileHandle handle =
                     repoHandle.openDatabase(folder, item, coId);
-            addedTypeIds = DatabaseImporter.apply(handle, symbols, comments,
+            applyResult = DatabaseImporter.apply(handle, symbols, comments,
                                    equateRenames, equateRefAdds, bookmarkChanges, paramRenames,
                                    dataTypeChanges, dataItemChanges, funcSigChanges, comment);
         } catch (Exception e) {
@@ -430,10 +430,13 @@ public class BridgeConnection implements Runnable {
         data.addProperty("data_items_written",  dataItemChanges.size());
         data.addProperty("func_sigs_written",   funcSigChanges.size());
         // Return the DB keys assigned to newly-added types so C++ can update its baseline.
-        JsonObject addedTypeIdsJson = new JsonObject();
-        for (java.util.Map.Entry<String, Long> e : addedTypeIds.entrySet())
-            addedTypeIdsJson.addProperty(e.getKey(), e.getValue());
-        data.add("added_type_ids", addedTypeIdsJson);
+        data.add("added_type_ids", applyResult.has("added_type_ids")
+            ? applyResult.get("added_type_ids") : new JsonObject());
+        // Per-category applied counts — lets the BN side warn when the server
+        // accepted fewer items than were sent (the shortfall would otherwise
+        // re-queue invisibly on every check-in).
+        if (applyResult.has("applied"))
+            data.add("applied", applyResult.get("applied"));
         respondOk(id, data);
     }
 

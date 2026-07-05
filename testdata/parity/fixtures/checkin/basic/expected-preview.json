@@ -34,6 +34,6 @@
     {"op": "delete", "addr": "0x400100", "type_name": ""}
   ],
   "func_sig_changes": [
-    {"key": 1, "cc": "win64", "ret_type": "uint64_t"}
+    {"key": 1, "ret_type": "uint64_t"}
   ]
 }

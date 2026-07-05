@@ -57,7 +57,7 @@ public class DatabaseImporter {
      * @param funcSigChanges   JSON array of {key, cc?, ret_type?} — function signature changes (may be null/empty)
      * @param versionComment   comment for the new version
      */
-    public static Map<String, Long> apply(ManagedBufferFileHandle handle,
+    public static JsonObject apply(ManagedBufferFileHandle handle,
                               JsonArray symbols,
                               JsonArray comments,
                               JsonArray equateRenames,
@@ -84,7 +84,7 @@ public class DatabaseImporter {
      * Convenience overload that omits the new fields — used by older callers
      * that only send symbols and comments.
      */
-    public static Map<String, Long> apply(ManagedBufferFileHandle handle,
+    public static JsonObject apply(ManagedBufferFileHandle handle,
                               JsonArray symbols,
                               JsonArray comments,
                               String versionComment) throws IOException {

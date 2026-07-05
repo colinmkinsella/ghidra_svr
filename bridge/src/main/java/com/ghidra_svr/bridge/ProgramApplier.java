@@ -58,8 +58,16 @@ public final class ProgramApplier {
 
     private ProgramApplier() {}
 
-    /** Apply all BN-side change arrays to the managed buffer file. */
-    public static Map<String, Long> apply(ManagedBufferFileHandle handle,
+    /**
+     * Apply all BN-side change arrays to the managed buffer file.
+     *
+     * @return JSON result: {"added_type_ids": {name: dbKey, ...},
+     *         "applied": {category: appliedCount, ...}} — applied counts let
+     *         the BN side warn when the server accepted fewer items than were
+     *         sent (the shortfall re-queues on every check-in otherwise
+     *         invisibly).
+     */
+    public static JsonObject apply(ManagedBufferFileHandle handle,
                                           JsonArray symbols,
                                           JsonArray comments,
                                           JsonArray equateRenames,
@@ -87,6 +95,7 @@ public final class ProgramApplier {
         }
 
         Map<String, Long> addedIds = new HashMap<>();
+        JsonObject applied = new JsonObject();
         try {
             int tx = program.startTransaction("BN sync");
             boolean ok = false;
@@ -102,16 +111,18 @@ public final class ProgramApplier {
 
                 // Data types first so symbols/params/data items can reference them.
                 if (dataTypeChanges != null && dataTypeChanges.size() > 0) {
-                    addedIds.putAll(applyDataTypes(program, dataTypeChanges));
+                    int[] dtApplied = new int[1];
+                    addedIds.putAll(applyDataTypes(program, dataTypeChanges, dtApplied));
+                    applied.addProperty("data_types", dtApplied[0]);
                 }
-                if (symbols         != null && symbols.size()         > 0) applySymbols(program, symbols);
-                if (comments        != null && comments.size()        > 0) applyComments(program, comments);
-                if (equateRenames   != null && equateRenames.size()   > 0) applyEquateRenames(program, equateRenames);
-                if (equateRefAdds   != null && equateRefAdds.size()   > 0) applyEquateRefAdds(program, equateRefAdds);
-                if (bookmarkChanges != null && bookmarkChanges.size() > 0) applyBookmarks(program, bookmarkChanges);
-                if (paramRenames    != null && paramRenames.size()    > 0) applyParameters(program, paramRenames);
-                if (dataItemChanges != null && dataItemChanges.size() > 0) applyDataItems(program, dataItemChanges);
-                if (funcSigChanges  != null && funcSigChanges.size()  > 0) applyFuncSigs(program, funcSigChanges);
+                if (symbols         != null && symbols.size()         > 0) applied.addProperty("symbols",         applySymbols(program, symbols));
+                if (comments        != null && comments.size()        > 0) applied.addProperty("comments",        applyComments(program, comments));
+                if (equateRenames   != null && equateRenames.size()   > 0) applied.addProperty("equate_renames",  applyEquateRenames(program, equateRenames));
+                if (equateRefAdds   != null && equateRefAdds.size()   > 0) applied.addProperty("equate_ref_adds", applyEquateRefAdds(program, equateRefAdds));
+                if (bookmarkChanges != null && bookmarkChanges.size() > 0) applied.addProperty("bookmarks",       applyBookmarks(program, bookmarkChanges));
+                if (paramRenames    != null && paramRenames.size()    > 0) applied.addProperty("params",          applyParameters(program, paramRenames));
+                if (dataItemChanges != null && dataItemChanges.size() > 0) applied.addProperty("data_items",      applyDataItems(program, dataItemChanges));
+                if (funcSigChanges  != null && funcSigChanges.size()  > 0) applied.addProperty("func_sigs",       applyFuncSigs(program, funcSigChanges));
                 program.endTransaction(tx, true);
                 ok = true;
             } finally {
@@ -125,7 +136,13 @@ public final class ProgramApplier {
         } finally {
             program.release(consumer);
         }
-        return addedIds;
+        JsonObject result = new JsonObject();
+        JsonObject addedJson = new JsonObject();
+        for (Map.Entry<String, Long> e : addedIds.entrySet())
+            addedJson.addProperty(e.getKey(), e.getValue());
+        result.add("added_type_ids", addedJson);
+        result.add("applied", applied);
+        return result;
     }
 
     // -------------------------------------------------------------------------
@@ -190,6 +207,10 @@ public final class ProgramApplier {
     // -------------------------------------------------------------------------
 
     static Map<String, Long> applyDataTypes(ProgramDB program, JsonArray changes) {
+        return applyDataTypes(program, changes, new int[1]);
+    }
+
+    static Map<String, Long> applyDataTypes(ProgramDB program, JsonArray changes, int[] appliedOut) {
         DataTypeManager dtm = program.getDataTypeManager();
         Map<String, Long> added = new HashMap<>();
         int n = 0, errors = 0;
@@ -343,6 +364,7 @@ public final class ProgramApplier {
         }
         System.err.println("[ghidra-bridge] data types applied: " + n
             + (errors > 0 ? " (" + errors + " errors)" : ""));
+        appliedOut[0] = n;
         return added;
     }
 
@@ -406,7 +428,7 @@ public final class ProgramApplier {
     // Symbols
     // -------------------------------------------------------------------------
 
-    static void applySymbols(ProgramDB program, JsonArray symbols) {
+    static int applySymbols(ProgramDB program, JsonArray symbols) {
         SymbolTable st = program.getSymbolTable();
         AddressFactory af = program.getAddressFactory();
         int count = 0;
@@ -431,13 +453,14 @@ public final class ProgramApplier {
             } catch (Exception ignored) {}
         }
         System.err.println("[ghidra-bridge] symbols written: " + count);
+        return count;
     }
 
     // -------------------------------------------------------------------------
     // Comments
     // -------------------------------------------------------------------------
 
-    static void applyComments(ProgramDB program, JsonArray comments) {
+    static int applyComments(ProgramDB program, JsonArray comments) {
         Listing listing = program.getListing();
         AddressFactory af = program.getAddressFactory();
         int count = 0;
@@ -467,13 +490,14 @@ public final class ProgramApplier {
             } catch (Exception ignored) {}
         }
         System.err.println("[ghidra-bridge] comments written: " + count);
+        return count;
     }
 
     // -------------------------------------------------------------------------
     // Equates
     // -------------------------------------------------------------------------
 
-    static void applyEquateRenames(ProgramDB program, JsonArray equateRenames) {
+    static int applyEquateRenames(ProgramDB program, JsonArray equateRenames) {
         // The BN side currently sends {id (long), name} where `id` is the raw DB
         // key of the equate record.  The EquateTable interface only exposes lookup
         // by name (String), so we resolve key→equate via the existing
@@ -531,9 +555,10 @@ public final class ProgramApplier {
             } catch (Exception ignored) {}
         }
         System.err.println("[ghidra-bridge] equate renames applied: " + count);
+        return count;
     }
 
-    static void applyEquateRefAdds(ProgramDB program, JsonArray equateRefAdds) {
+    static int applyEquateRefAdds(ProgramDB program, JsonArray equateRefAdds) {
         ghidra.program.model.symbol.EquateTable et = program.getEquateTable();
         AddressFactory af = program.getAddressFactory();
         // Same key → Equate map as applyEquateRenames.
@@ -569,13 +594,14 @@ public final class ProgramApplier {
             } catch (Exception ignored) {}
         }
         System.err.println("[ghidra-bridge] equate refs added: " + count);
+        return count;
     }
 
     // -------------------------------------------------------------------------
     // Bookmarks
     // -------------------------------------------------------------------------
 
-    static void applyBookmarks(ProgramDB program, JsonArray bookmarkChanges) {
+    static int applyBookmarks(ProgramDB program, JsonArray bookmarkChanges) {
         ghidra.program.model.listing.BookmarkManager bm = program.getBookmarkManager();
         AddressFactory af = program.getAddressFactory();
         int count = 0;
@@ -599,6 +625,7 @@ public final class ProgramApplier {
             } catch (Exception ignored) {}
         }
         System.err.println("[ghidra-bridge] bookmarks applied: " + count);
+        return count;
     }
 
     // -------------------------------------------------------------------------
@@ -610,7 +637,7 @@ public final class ProgramApplier {
     // parameter storage.  For a simple append that is heavier and riskier than the
     // direct call, so we keep addParameter and suppress the single deprecation here.
     @SuppressWarnings("deprecation")
-    static void applyParameters(ProgramDB program, JsonArray paramRenames) {
+    static int applyParameters(ProgramDB program, JsonArray paramRenames) {
         SymbolTable st = program.getSymbolTable();
         FunctionManager fm = program.getFunctionManager();
         DataTypeManager dtm = program.getDataTypeManager();
@@ -685,13 +712,14 @@ public final class ProgramApplier {
         }
         System.err.println("[ghidra-bridge] params applied: " + count
             + (skippedLocals > 0 ? " (skipped " + skippedLocals + " locals — storage mapping not implemented)" : ""));
+        return count;
     }
 
     // -------------------------------------------------------------------------
     // Data items
     // -------------------------------------------------------------------------
 
-    static void applyDataItems(ProgramDB program, JsonArray dataItems) {
+    static int applyDataItems(ProgramDB program, JsonArray dataItems) {
         Listing listing = program.getListing();
         DataTypeManager dtm = program.getDataTypeManager();
         AddressFactory af = program.getAddressFactory();
@@ -724,13 +752,14 @@ public final class ProgramApplier {
             }
         }
         System.err.println("[ghidra-bridge] data items applied: " + count);
+        return count;
     }
 
     // -------------------------------------------------------------------------
     // Function signatures
     // -------------------------------------------------------------------------
 
-    static void applyFuncSigs(ProgramDB program, JsonArray changes) {
+    static int applyFuncSigs(ProgramDB program, JsonArray changes) {
         FunctionManager fm = program.getFunctionManager();
         DataTypeManager dtm = program.getDataTypeManager();
         int count = 0;
@@ -783,6 +812,7 @@ public final class ProgramApplier {
             if (changed) ++count;
         }
         System.err.println("[ghidra-bridge] func sig changes applied: " + count);
+        return count;
     }
 
     // -------------------------------------------------------------------------
