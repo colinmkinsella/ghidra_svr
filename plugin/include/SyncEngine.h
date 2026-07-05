@@ -1,7 +1,6 @@
 #pragma once
 #include "GhidraConnection.h"
 #include <binaryninjaapi.h>
-#include <ui/uitypes.h>
 #include <unordered_map>
 
 struct SyncResult {
@@ -39,7 +38,7 @@ struct SyncResult {
  */
 class SyncEngine {
 public:
-    static SyncResult applyToView(BinaryViewRef view,
+    static SyncResult applyToView(BinaryNinja::Ref<BinaryNinja::BinaryView> view,
                                   const GhidraDbExport& data);
 
     /**
@@ -47,10 +46,11 @@ public:
      * @p view.  Used to restore check-in state after a restart (where
      * the user may have pending BN renames that must not be overwritten).
      */
-    static SyncResult buildWritebackMaps(BinaryViewRef view,
+    static SyncResult buildWritebackMaps(BinaryNinja::Ref<BinaryNinja::BinaryView> view,
                                          const GhidraDbExport& data);
 
 private:
     static BinaryNinja::Ref<BinaryNinja::TagType>
-        getOrCreateTagType(BinaryViewRef view, const std::string& name);
+        getOrCreateTagType(BinaryNinja::Ref<BinaryNinja::BinaryView> view,
+                           const std::string& name);
 };

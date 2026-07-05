@@ -1,4 +1,4 @@
-Ghidra Bridge — Server Deployment Package
+Ghidra Bridge -- Server Deployment Package
 ==========================================
 
 This package runs on the same machine as your Ghidra Server.
@@ -22,31 +22,20 @@ Quick start (Windows)
 Firewall
 --------
 Allow TCP port 13200 inbound from your Binary Ninja client machine(s).
-The bridge has no built-in authentication — restrict access at the
+The bridge has no built-in authentication -- restrict access at the
 firewall level to trusted hosts only.
 
 Binary Ninja settings
 ---------------------
-In BN: Settings → Ghidra → Bridge Mode  → set to "remote"
-        Settings → Ghidra → Bridge Port  → set to match the port above (default: 13200)
-The bridge host is always the same as the Ghidra Server host entered in
-the Connect dialog — no separate host configuration needed.
+In BN: Settings -> Ghidra -> Bridge Mode  -> set to "remote"
+        Settings -> Ghidra -> Bridge Port  -> set to match port above (default: 13200)
+The bridge host is always the same as the Ghidra Server host entered
+in the Connect dialog -- no separate host configuration needed.
 
-Running as a service
---------------------
-Linux (systemd) — create /etc/systemd/system/ghidra-bridge.service:
-
-  [Unit]
-  Description=Ghidra Bridge
-  After=network.target
-
-  [Service]
-  ExecStart=/path/to/server-package/start-bridge.sh
-  Environment=GHIDRA_HOME=/path/to/ghidra_12.x_PUBLIC
-  Restart=on-failure
-  User=ghidra
-
-  [Install]
-  WantedBy=multi-user.target
-
-Then: systemctl enable --now ghidra-bridge
+Running as a Windows service
+----------------------------
+Use NSSM (https://nssm.cc) or Task Scheduler to run start-bridge.bat at startup.
+Example with NSSM:
+  nssm install GhidraBridge "C:\path\to\server-package\start-bridge.bat"
+  nssm set GhidraBridge AppEnvironmentExtra GHIDRA_HOME=C:\path\to\ghidra
+  nssm start GhidraBridge

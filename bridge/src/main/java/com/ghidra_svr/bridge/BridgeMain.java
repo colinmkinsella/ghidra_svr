@@ -88,7 +88,8 @@ public class BridgeMain {
 
     /** Installs a no-op TrustManager so the bridge accepts any server certificate.
      *  Use only on trusted internal networks or for development. */
-    private static void installTrustAllContext() throws Exception {
+    // Package-visible: LiveServerE2ETest reuses this against its self-signed test server.
+    static void installTrustAllContext() throws Exception {
         TrustManager[] trustAll = new TrustManager[]{
             new X509TrustManager() {
                 public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }

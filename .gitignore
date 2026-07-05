@@ -19,6 +19,12 @@ bridge/gradle.properties
 # Claude Code settings
 .claude/
 
+# Editor settings
+.vscode/
+
+# Built bridge jar staged into the server package by build scripts
+server-package/*.jar
+
 # Windows
 Thumbs.db
 Desktop.ini

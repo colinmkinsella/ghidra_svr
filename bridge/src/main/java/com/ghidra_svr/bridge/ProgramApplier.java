@@ -243,7 +243,12 @@ public final class ProgramApplier {
 
                 if ("struct".equals(kind)) {
                     int size = c.has("size") ? c.get("size").getAsInt() : 0;
-                    StructureDataType s = new StructureDataType(name, size, dtm);
+                    // Start at length 0 and place members at their declared
+                    // offsets. Constructing with the declared size pre-fills
+                    // that many undefined bytes and add() appends AFTER them,
+                    // displacing every member by `size` and doubling the
+                    // struct (caught by the canonical parity tests).
+                    StructureDataType s = new StructureDataType(name, 0, dtm);
                     JsonArray members = c.has("members") ? c.get("members").getAsJsonArray() : new JsonArray();
                     for (JsonElement mel : members) {
                         JsonObject m = mel.getAsJsonObject();
@@ -251,6 +256,7 @@ public final class ProgramApplier {
                         String mTyN  = getStr(m, "type_name", "");
                         String mCmt  = getStr(m, "comment", "");
                         int mSize    = m.has("size") ? m.get("size").getAsInt() : 0;
+                        int mOffset  = m.has("offset") ? m.get("offset").getAsInt() : -1;
                         DataType mDt = resolveDataType(dtm, mTyN, mSize);
                         if (mDt == null) {
                             // Unknown type → use undefined of the given size so the offset is preserved.
@@ -259,11 +265,22 @@ public final class ProgramApplier {
                                 : Undefined1DataType.dataType;
                         }
                         try {
-                            s.add(mDt, mSize > 0 ? mSize : mDt.getLength(),
-                                  mName.isEmpty() ? null : mName,
-                                  mCmt.isEmpty() ? null : mCmt);
+                            if (mOffset >= 0) {
+                                s.insertAtOffset(mOffset, mDt,
+                                                 mSize > 0 ? mSize : mDt.getLength(),
+                                                 mName.isEmpty() ? null : mName,
+                                                 mCmt.isEmpty() ? null : mCmt);
+                            } else {
+                                s.add(mDt, mSize > 0 ? mSize : mDt.getLength(),
+                                      mName.isEmpty() ? null : mName,
+                                      mCmt.isEmpty() ? null : mCmt);
+                            }
                         } catch (Exception e) { /* skip bad member */ }
                     }
+                    // Preserve trailing padding when the declared size exceeds
+                    // the last member's end.
+                    if (size > s.getLength())
+                        s.growStructure(size - s.getLength());
                     DataType result = dtm.addDataType(s, DataTypeConflictHandler.REPLACE_HANDLER);
                     if ("add".equals(op) && result != null) added.put(name, dtm.getID(result));
                     ++n;
@@ -701,7 +718,10 @@ public final class ProgramApplier {
                     listing.createData(addr, dt);
                     ++count;
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                System.err.println("[ghidra-bridge] data item " + getStr(d, "addr", "?")
+                    + " failed: " + e);
+            }
         }
         System.err.println("[ghidra-bridge] data items applied: " + count);
     }
@@ -736,9 +756,27 @@ public final class ProgramApplier {
             if (c.has("cc")) {
                 String cc = c.get("cc").getAsString();
                 if (!cc.isEmpty()) {
+                    // BN names conventions "cdecl"/"stdcall"; Ghidra's compiler
+                    // specs register them as "__cdecl"/"__stdcall". Since
+                    // Ghidra 11 setCallingConvention() accepts ANY string
+                    // (stored as an unusable custom convention), so we must
+                    // resolve against the spec's known models ourselves —
+                    // otherwise the CC silently never lands and BN re-queues
+                    // the same change on every check-in.
                     try {
-                        f.setCallingConvention(cc);
-                        changed = true;
+                        java.util.Set<String> known = new java.util.HashSet<>();
+                        for (ghidra.program.model.lang.PrototypeModel m
+                                : program.getCompilerSpec().getCallingConventions())
+                            known.add(m.getName());
+                        String resolved = known.contains(cc) ? cc
+                            : known.contains("__" + cc) ? "__" + cc : null;
+                        if (resolved != null) {
+                            f.setCallingConvention(resolved);
+                            changed = true;
+                        } else {
+                            System.err.println("[ghidra-bridge] unknown calling convention '"
+                                + cc + "' for function at " + f.getEntryPoint() + " — skipped");
+                        }
                     } catch (Exception ignored) {}
                 }
             }

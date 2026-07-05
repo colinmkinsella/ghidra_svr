@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
-# run_tests.sh  —  Build and run the binja-ghidra test suite (Linux / macOS)
+# test.sh  —  Build and run the binja-ghidra test suite (Linux / macOS)
 #
-# Usage:  ./run_tests.sh [options]
+# Usage:  ./test.sh [options]
 #
-#   (no args)   Run both the C++ unit tests and the Java bridge tests
-#   --cpp       Run C++ tests only
-#   --java      Run Java tests only
-#   --no-build  Skip the cmake --build step (use existing test binary)
+#   (no args)   Run the C++ unit tests, the BN-headless/parity tests and
+#               the Java bridge tests (tiers 0-3)
+#   --cpp       C++ tests only (unit + BN-headless)
+#   --java      Java tests only
+#   --parity    Cross-DB parity tier only (C++ BN tests + gradlew parityTest)
+#   --e2e       Live Ghidra-server E2E tier (sets GHIDRA_E2E=1, gradlew e2eTest)
+#   --no-build  Skip the cmake --build step (use existing test binaries)
 #   --verbose   Pass --gtest_print_time=1 to C++ runner; show all Gradle output
+#
+# Test tiers (see testdata/parity/RULES.md):
+#   0  Pure unit          binja-ghidra-tests + bridge *Test.java     always
+#   1  Ghidra round-trip  bridge *RoundTripTest.java                 needs GHIDRA_HOME
+#   2  BN .bndb tests     binja-ghidra-bn-tests                      SKIPs w/o BN license
+#   3  Cross-DB parity    CanonicalParityTest (C++ + Java)           shared goldens
+#   4  Live-server E2E    LiveServerE2ETest                          only via --e2e
 #
 # Prerequisites:
 #   C++ tests: CMake build must have been configured (cmake -B plugin/build -S plugin)
+#   BN tests:  Binary Ninja libs resolvable; headless-capable license
+#              (BN_LICENSE env var is honoured); otherwise those tests SKIP
 #   Java tests: Java 17+ must be on PATH; gradle.properties must set ghidraHome
+#   E2E tests: runnable ghidraSvr under ghidraHome (full Ghidra install)
 #
 # Exit code:
 #   0  All selected test suites passed
@@ -42,18 +55,23 @@ fail()    { echo -e "${RED}$*${RESET}"; }
 # Parse arguments
 # ---------------------------------------------------------------------------
 RUN_CPP=1
+RUN_BN=1
 RUN_JAVA=1
+RUN_E2E=0
 DO_BUILD=1
 VERBOSE=0
+JAVA_TASK=test
 
 for arg in "$@"; do
     case "$arg" in
         --cpp)      RUN_JAVA=0 ;;
-        --java)     RUN_CPP=0  ;;
+        --java)     RUN_CPP=0; RUN_BN=0 ;;
+        --parity)   RUN_CPP=0; JAVA_TASK=parityTest ;;
+        --e2e)      RUN_CPP=0; RUN_BN=0; RUN_JAVA=0; RUN_E2E=1 ;;
         --no-build) DO_BUILD=0 ;;
         --verbose)  VERBOSE=1  ;;
         -h|--help)
-            sed -n '2,18p' "$0" | sed 's/^# *//'
+            sed -n '2,32p' "$0" | sed 's/^# *//'
             exit 0
             ;;
         *)
@@ -67,77 +85,103 @@ done
 # Tracking
 # ---------------------------------------------------------------------------
 CPP_STATUS="skipped"
+BN_STATUS="skipped"
 JAVA_STATUS="skipped"
+E2E_STATUS="skipped"
 
 # ---------------------------------------------------------------------------
-# C++ tests
+# Shared: run one gtest binary; sets the named status variable
 # ---------------------------------------------------------------------------
-if [[ $RUN_CPP -eq 1 ]]; then
-    echo
-    info "====== C++ tests ======"
-
-    # Verify the build has been configured
+run_gtest_target() {
+    local target="$1" status_var="$2"
     if [[ ! -f "$PLUGIN_BUILD/build.ninja" && ! -f "$PLUGIN_BUILD/Makefile" ]]; then
         fail "ERROR: plugin/build has not been configured yet."
         fail "       Run:  cmake -B plugin/build -S plugin   then try again."
-        CPP_STATUS="error"
-    else
-        # (Re-)build the test binary
-        if [[ $DO_BUILD -eq 1 ]]; then
-            info "Building binja-ghidra-tests..."
-            NPROC=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
-            cmake --build "$PLUGIN_BUILD" --target binja-ghidra-tests -j "$NPROC"
-        fi
-
-        TEST_BIN="$PLUGIN_BUILD/binja-ghidra-tests"
-        if [[ ! -x "$TEST_BIN" ]]; then
-            fail "ERROR: Test binary not found at $TEST_BIN"
-            fail "       Build may have failed — run without --no-build to rebuild."
-            CPP_STATUS="error"
-        else
-            info "Running C++ test binary..."
-            CPP_ARGS=("--gtest_color=yes")
-            [[ $VERBOSE -eq 1 ]] && CPP_ARGS+=("--gtest_print_time=1")
-
-            if "$TEST_BIN" "${CPP_ARGS[@]}"; then
-                CPP_STATUS="passed"
-            else
-                CPP_STATUS="failed"
-            fi
+        printf -v "$status_var" error
+        return
+    fi
+    if [[ $DO_BUILD -eq 1 ]]; then
+        info "Building $target..."
+        local nproc
+        nproc=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+        if ! cmake --build "$PLUGIN_BUILD" --target "$target" -j "$nproc"; then
+            printf -v "$status_var" error
+            return
         fi
     fi
+    local bin="$PLUGIN_BUILD/$target"
+    if [[ ! -x "$bin" ]]; then
+        fail "ERROR: Test binary not found at $bin"
+        printf -v "$status_var" error
+        return
+    fi
+    info "Running $target..."
+    local args=("--gtest_color=yes")
+    [[ $VERBOSE -eq 1 ]] && args+=("--gtest_print_time=1")
+    if "$bin" "${args[@]}"; then
+        printf -v "$status_var" passed
+    else
+        printf -v "$status_var" failed
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# C++ unit tests (tier 0)
+# ---------------------------------------------------------------------------
+if [[ $RUN_CPP -eq 1 ]]; then
+    echo
+    info "====== C++ unit tests ======"
+    run_gtest_target binja-ghidra-tests CPP_STATUS
 fi
 
 # ---------------------------------------------------------------------------
-# Java tests
+# BN-headless tests (tiers 2 + 3, C++ side) — SKIP cleanly without a license
 # ---------------------------------------------------------------------------
-if [[ $RUN_JAVA -eq 1 ]]; then
+if [[ $RUN_BN -eq 1 ]]; then
+    echo
+    info "====== BN-headless / parity tests ======"
+    run_gtest_target binja-ghidra-bn-tests BN_STATUS
+fi
+
+# ---------------------------------------------------------------------------
+# Java tests (tiers 0/1/3 via `test`, or parityTest / e2eTest tasks)
+# ---------------------------------------------------------------------------
+if [[ $RUN_JAVA -eq 1 || $RUN_E2E -eq 1 ]]; then
     echo
     info "====== Java bridge tests ======"
+
+    GRADLE_TASK="$JAVA_TASK"
+    [[ $RUN_E2E -eq 1 ]] && GRADLE_TASK=e2eTest
 
     if ! java -version > /dev/null 2>&1; then
         fail "ERROR: Java not found — cannot run Java tests."
         fail "       Install JDK 17+ and ensure 'java' is on your PATH."
-        JAVA_STATUS="error"
+        [[ $RUN_E2E -eq 1 ]] && E2E_STATUS="error" || JAVA_STATUS="error"
     elif [[ ! -f "$BRIDGE_DIR/gradle.properties" ]]; then
         fail "ERROR: bridge/gradle.properties not found."
         fail "       Create it with:  ghidraHome=/path/to/ghidra_12.x_PUBLIC"
-        JAVA_STATUS="error"
+        [[ $RUN_E2E -eq 1 ]] && E2E_STATUS="error" || JAVA_STATUS="error"
     else
-        GRADLE_ARGS=(test --rerun)
+        GRADLE_ARGS=("$GRADLE_TASK" --rerun)
         if [[ $VERBOSE -eq 0 ]]; then
             # Quiet build output; test results are always shown via testLogging
             GRADLE_ARGS+=(--quiet)
         fi
 
-        info "Running Java tests via Gradle..."
+        if [[ $RUN_E2E -eq 1 ]]; then
+            info "Running live-server E2E tests (this starts a local ghidraSvr)..."
+            export GHIDRA_E2E=1
+        else
+            info "Running Java tests via Gradle ($GRADLE_TASK)..."
+        fi
         pushd "$BRIDGE_DIR" > /dev/null
         if ./gradlew "${GRADLE_ARGS[@]}"; then
-            JAVA_STATUS="passed"
+            RESULT="passed"
         else
-            JAVA_STATUS="failed"
+            RESULT="failed"
         fi
         popd > /dev/null
+        [[ $RUN_E2E -eq 1 ]] && E2E_STATUS="$RESULT" || JAVA_STATUS="$RESULT"
     fi
 fi
 
@@ -161,8 +205,10 @@ print_status() {
     esac
 }
 
-print_status "C++ tests (GhidraConnectionState / CheckinPreview / BridgeClientProtocol)" "$CPP_STATUS"
-print_status "Java tests (DatabaseImporter / DatabaseRoundTrip)"                          "$JAVA_STATUS"
+print_status "C++ unit tests (GhidraConnectionState / CheckinPreview / Protocol / GhidraJson)" "$CPP_STATUS"
+print_status "BN-headless tests (SyncEngine / CheckinCollect / CanonicalParity)"               "$BN_STATUS"
+print_status "Java tests (RoundTrip / CanonicalParity)"                                        "$JAVA_STATUS"
+print_status "Live-server E2E"                                                                  "$E2E_STATUS"
 
 echo
 if [[ $EXIT_CODE -eq 0 ]]; then

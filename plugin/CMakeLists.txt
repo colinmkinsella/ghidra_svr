@@ -110,6 +110,7 @@ add_library(binja-ghidra SHARED
     src/BridgeProcess.cpp
     src/BridgeClient.cpp
     src/GhidraConnection.cpp
+    src/GhidraJson.cpp
     src/SyncEngine.cpp
     src/ui/ConnectDialog.cpp
     src/ui/ProjectPanel.cpp
@@ -196,9 +197,11 @@ add_executable(binja-ghidra-tests EXCLUDE_FROM_ALL
     test/GhidraConnectionStateTest.cpp
     test/CheckinPreviewTest.cpp
     test/BridgeClientProtocolTest.cpp
+    test/GhidraJsonTest.cpp
     # Qt-free production sources only
     src/BridgeClient.cpp
     src/GhidraConnection.cpp
+    src/GhidraJson.cpp
     src/BridgeProcess.cpp
     src/enterprise_stubs.cpp
 )
@@ -227,6 +230,62 @@ target_compile_definitions(binja-ghidra-tests PRIVATE
 
 include(GoogleTest)
 gtest_discover_tests(binja-ghidra-tests)
+
+# ---------------------------------------------------------------------------
+# BN-headless tests (tier 2/3) — target binja-ghidra-bn-tests
+#
+# These initialize binaryninjacore headlessly and exercise SyncEngine /
+# collectCheckinChanges against real BinaryViews and .bndb files. They need
+# binaryninjacore.dll on PATH and a headless-capable BN license; when either
+# is missing the tests SKIP (see test/bn/BnTestMain.cpp), so the target is
+# safe to run on any machine.  Run with:  test.bat --parity
+# ---------------------------------------------------------------------------
+add_executable(binja-ghidra-bn-tests EXCLUDE_FROM_ALL
+    test/bn/BnTestMain.cpp
+    test/bn/BnViewFixture.cpp
+    test/bn/BnHarnessSmokeTest.cpp
+    test/bn/SyncEngineImportTest.cpp
+    test/bn/CheckinCollectTest.cpp
+    test/bn/CanonicalParityTest.cpp
+    test/support/BnCanonicalExport.cpp
+    test/support/CanonicalDiff.cpp
+    # Qt-free production sources under test
+    src/BridgeClient.cpp
+    src/BridgeProcess.cpp
+    src/GhidraConnection.cpp
+    src/GhidraJson.cpp
+    src/SyncEngine.cpp
+    src/enterprise_stubs.cpp
+)
+
+target_include_directories(binja-ghidra-bn-tests PRIVATE
+    include
+    test
+    "${CMAKE_SOURCE_DIR}/../binaryninja-api/vendor"   # nlohmann/json.hpp
+)
+
+target_link_libraries(binja-ghidra-bn-tests PRIVATE
+    GTest::gtest
+    binaryninjaapi
+)
+
+if(WIN32)
+    target_link_libraries(binja-ghidra-bn-tests PRIVATE ws2_32)
+elseif(UNIX AND NOT APPLE)
+    target_link_libraries(binja-ghidra-bn-tests PRIVATE dl)
+endif()
+
+target_compile_definitions(binja-ghidra-bn-tests PRIVATE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+    _CRT_SECURE_NO_WARNINGS
+    PARITY_TESTDATA_DIR="${CMAKE_SOURCE_DIR}/../testdata"
+)
+
+gtest_discover_tests(binja-ghidra-bn-tests
+    DISCOVERY_MODE PRE_TEST
+    PROPERTIES LABELS "bn;parity"
+)
 install(FILES
     "${CMAKE_SOURCE_DIR}/../bridge/build/libs/ghidra-bridge-0.1.0.jar"
     DESTINATION "${BN_USER_PLUGINS_DIR}"

@@ -93,6 +93,30 @@ class FunctionSignaturesRoundTripTest extends ProgramTestBase {
             "StackPurge changed across a return-type update — silent IntField truncation regression");
     }
 
+    /**
+     * REGRESSION: BN names calling conventions without the leading
+     * double-underscore ("cdecl", "stdcall") while Ghidra's compiler specs
+     * register "__cdecl"/"__stdcall".  setCallingConvention("cdecl") throws
+     * and was silently swallowed, so the CC never landed in Ghidra and BN
+     * re-queued the same change on every check-in.  The applier must retry
+     * with the "__" prefix.
+     */
+    @Test
+    @DisplayName("import: BN-style cc name without underscores maps to Ghidra's __-prefixed cc")
+    void bnStyleCallingConvention_isPrefixMapped() throws Exception {
+        ProgramDB p = newProgram();
+        long key = mkFunc(p, memoryStart() + 0x400, "i");
+
+        JsonArray changes = new JsonArray();
+        changes.add(sigChange(key, null, "stdcall"));
+        withTx(p, "cc", () -> ProgramApplier.applyFuncSigs(p, changes));
+
+        Function fn = p.getFunctionManager().getFunction(key);
+        assertNotNull(fn);
+        assertEquals("__stdcall", fn.getCallingConventionName(),
+            "BN's 'stdcall' should have been applied as Ghidra's '__stdcall'");
+    }
+
     @Test
     @DisplayName("import: unknown calling convention is silently ignored, no exception")
     void unknownCallingConvention_isIgnored() throws Exception {
@@ -103,5 +127,11 @@ class FunctionSignaturesRoundTripTest extends ProgramTestBase {
         changes.add(sigChange(key, null, "__totally_made_up"));
         assertDoesNotThrow(() ->
             withTx(p, "bad cc", () -> ProgramApplier.applyFuncSigs(p, changes)));
+
+        // Ghidra 11+ would happily store the bogus name as a "custom"
+        // convention; the applier must skip it instead.
+        Function fn = p.getFunctionManager().getFunction(key);
+        assertNotEquals("__totally_made_up", fn.getCallingConventionName(),
+            "bogus CC name must not be stored as a custom convention");
     }
 }

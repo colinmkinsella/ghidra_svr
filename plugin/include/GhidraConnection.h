@@ -516,8 +516,12 @@ private:
     // Parameter baseline — keyed by Ghidra symbol key
     std::unordered_map<int64_t, std::string>  m_paramOriginalNameByKey;
     std::unordered_map<int64_t, std::string>  m_paramOriginalTypeByKey; // key → type name at checkout
-    // (ghidraFuncAddr, ordinal) → Ghidra symbol key
+    // (ghidraFuncAddr, ordinal) → Ghidra symbol key.  Params (ordinal = index)
+    // and stack locals (ordinal = stack offset) live in separate maps: both
+    // number from 0, so a shared map would let a parameter baseline swallow a
+    // stack variable at offset 0 (e.g. BN's __return_addr) and vice versa.
     std::unordered_map<uint64_t, std::unordered_map<int, int64_t>> m_paramKeyByAddrOrdinal;
+    std::unordered_map<uint64_t, std::unordered_map<int, int64_t>> m_localKeyByAddrOffset;
     // New params checked in since last checkout (ghidraFuncAddr → ordinal → name at last check-in).
     // Prevents re-queuing params that were already sent to Ghidra but have no DB key yet.
     std::unordered_map<uint64_t, std::unordered_map<int, std::string>> m_newParamBaseline;

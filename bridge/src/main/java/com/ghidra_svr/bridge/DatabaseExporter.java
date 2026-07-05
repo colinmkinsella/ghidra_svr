@@ -108,6 +108,14 @@ public class DatabaseExporter {
             System.err.println("[ghidra-bridge] address map loaded: " + addrMap.size() + " segments");
 
             long imageBase = addrMap.getOrDefault(0L, 0L);
+            // For raw/BinaryLoader-imported programs the ADDRESS MAP's first row
+            // is 0 even when all memory lives at a non-zero base — which would
+            // make the BN plugin rebase every address by the full BN load base.
+            // Fall back to the lowest memory block start in that case.
+            if (imageBase == 0 && program != null) {
+                ghidra.program.model.address.Address min = program.getMemory().getMinAddress();
+                if (min != null) imageBase = min.getOffset();
+            }
             System.err.println("[ghidra-bridge] image_base=0x" + Long.toHexString(imageBase));
 
             JsonObject out = new JsonObject();
@@ -318,6 +326,17 @@ public class DatabaseExporter {
         Map<Long, String> typeNameById = new HashMap<>();
         buildTypeNameMap(db, typeNameById);
 
+        // The Function Data schema moved between adapter versions:
+        //   V2 (older DBs):     col 1 = return type id, col 3 = CC name (string)
+        //   V3 (Ghidra 11/12+): col 0 = return type id, col 1 = stack purge,
+        //                       CC stored as a byte id (no name string column)
+        // Detect by col 3's field class — StringField only in V2.
+        boolean v2Schema = false;
+        try {
+            v2Schema = table.getSchema().getFields()[FUNC_CC_COL] instanceof db.StringField;
+        } catch (Exception ignored) {}
+        final int retTypeCol = v2Schema ? FUNC_RET_TYPE_COL : 0;
+
         RecordIterator iter = table.iterator();
         while (iter.hasNext()) {
             DBRecord rec = iter.next();
@@ -325,11 +344,13 @@ public class DatabaseExporter {
 
             // --- signature fields ---
             String cc = "";
-            try { cc = emptyIfNull(rec.getString(FUNC_CC_COL)); } catch (Exception ignored) {}
+            if (v2Schema) {
+                try { cc = emptyIfNull(rec.getString(FUNC_CC_COL)); } catch (Exception ignored) {}
+            }
 
             long retTypeId = -1L;
             String retTypeName = "";
-            try { retTypeId = rec.getLongValue(FUNC_RET_TYPE_COL); } catch (Exception ignored) {}
+            try { retTypeId = rec.getLongValue(retTypeCol); } catch (Exception ignored) {}
             if (retTypeId >= 0) retTypeName = typeNameById.getOrDefault(retTypeId, "");
 
             // Skip records with no useful data (no flags, no CC, no return type)
@@ -376,8 +397,9 @@ public class DatabaseExporter {
             } catch (Exception ignored) {}
         }
         // Built-in primitive types (int, char, void, etc.): name is col 0
-        // These live in Ghidra's program DB as a "Built-In Data Types" table.
-        for (String tableName : new String[]{"Built-In Data Types", "BuiltInTypes", "Built In Data Types"}) {
+        // Ghidra 12 names this table "Built-in datatypes"; older variants kept
+        // for robustness against upgraded databases.
+        for (String tableName : new String[]{"Built-in datatypes", "Built-In Data Types", "BuiltInTypes", "Built In Data Types"}) {
             Table bt = db.getTable(tableName);
             if (bt == null) continue;
             try {

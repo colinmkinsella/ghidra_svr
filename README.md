@@ -83,19 +83,46 @@ The bridge JVM also initialises Ghidra's `Application` framework at startup so t
 ## Testing
 
 ```sh
-./test.sh        # macOS / Linux: runs C++ tests + Java tests
-test.bat         # Windows equivalent
+./test.sh          # macOS / Linux: tiers 0-3 (C++ unit + BN-headless + Java)
+test.bat           # Windows equivalent
+test.bat --parity  # cross-DB parity tier only (C++ BN tests + gradlew parityTest)
+test.bat --e2e     # live Ghidra-server E2E (starts a local ghidraSvr)
 ```
 
-The Java side has **two test layers**:
+The suite is organised in five tiers. Tiers 2–4 exist to prove one property:
+**the same compatible data ends up stored in both the .bndb and the Ghidra
+program database** (the compatibility matrix at the top of this README).
 
-- **Legacy raw-write tests** (`*Test.java`) — exercise the deprecated `DatabaseImporter.applyXxx` helpers against an in-memory `DBHandle`. Fast; do not require a Ghidra install. Kept because they pin down behaviour of the helpers tests still call directly.
-- **Round-trip tests** (`*RoundTripTest.java`) — exercise the production `ProgramApplier` write path against a real `ProgramDB` built with Ghidra's `ProgramBuilder`. Each kind (symbols, comments, data types, function sigs, parameters, equates, bookmarks, data items) has its own class. **Three explicit regression pins**:
+| Tier | What | Where | Gate |
+|---|---|---|---|
+| 0 | Pure unit tests | `plugin/test/*.cpp` (`binja-ghidra-tests`), bridge `*Test.java` | always |
+| 1 | Ghidra-DB round-trip | bridge `*RoundTripTest.java` (`ProgramApplier` against a real `ProgramDB`) | needs `ghidra.home` / `GHIDRA_HOME` |
+| 2 | BN BinaryView/.bndb round-trip | `plugin/test/bn/` (`binja-ghidra-bn-tests`; headless binaryninjacore) | SKIPs cleanly without a headless-capable BN license (`BN_LICENSE` env honoured) |
+| 3 | Cross-DB parity | `CanonicalParityTest` (C++ **and** Java) against the shared goldens in `testdata/parity/fixtures/` | with tiers 1+2 |
+| 4 | Live-server E2E | bridge `LiveServerE2ETest` — boots a real `ghidraSvr` in a temp dir, seeds via `analyzeHeadless`, drives checkout → export → checkin → re-export over RMI | `test.bat --e2e` (sets `GHIDRA_E2E=1`) |
+
+**Parity oracle (tier 3).** Both sides independently verify against the same
+checked-in canonical JSON (the bridge `DatabaseExporter` shape). Import
+direction: the golden loads into a `ProgramDB` (Java) and into a BinaryView
+via `SyncEngine` (C++), and each re-export must equal the golden. Checkin
+direction: scripted BN edits must produce exactly
+`fixtures/checkin/*/expected-preview.json` (C++), and applying that preview via
+`ProgramApplier` must re-export as `expected-after.json` (Java). If both sides
+match the shared goldens, the two databases agree by transitivity. Field
+compare modes and the type-name normalization table live in
+[testdata/parity/RULES.md](testdata/parity/RULES.md); the test binary is
+`testdata/bin/parity_x64.bin` (layout in `parity_x64.md`).
+
+Long-standing regression pins on the Java side:
   - `DataTypesRoundTripTest.struct_cloneSettings_doesNotThrow` — composite settings must stay consistent with header (cloneAllComponentSettings crash)
   - `FunctionSignaturesRoundTripTest.returnType_doesNotCorruptStackPurge` — IntField truncation
   - `ParametersRoundTripTest.noParameterSymbol_endsUpAtRamAddress` — VariableAddress invariant
 
-Round-trip tests require a Ghidra install (used at runtime for language services). The path is read from the `ghidra.home` Gradle system property or `GHIDRA_HOME` env var; `build.gradle` passes `ghidraHome` through by default.
+Round-trip and parity tests require a Ghidra install (used at runtime for
+language services). The path is read from the `ghidra.home` Gradle system
+property or `GHIDRA_HOME` env var; `build.gradle` passes `ghidraHome` through
+by default. Tier-2/3 C++ tests additionally need `binaryninjacore` loadable
+(the scripts put the BN install dir on `PATH`).
 
 ## Prerequisites
 

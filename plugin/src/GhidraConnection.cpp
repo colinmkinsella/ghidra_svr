@@ -1,4 +1,5 @@
 #include "GhidraConnection.h"
+#include "GhidraJson.h"
 #include <binaryninjaapi.h>
 #ifdef _WIN32
 #  include <windows.h>
@@ -268,18 +269,8 @@ void GhidraConnection::disconnectFromServer() {
 // Utility
 // ---------------------------------------------------------------------------
 
-static std::string toHex(uint64_t v) {
-    char buf[20];
-    snprintf(buf, sizeof(buf), "0x%llx", (unsigned long long)v);
-    return buf;
-}
-
-static uint64_t parseHexAddr(const std::string& s) {
-    if (s.size() < 2) return 0;
-    const char* p = s.c_str();
-    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
-    return std::strtoull(p, nullptr, 16);
-}
+using ghidra_json::toHex;
+using ghidra_json::parseHexAddr;
 
 // ---------------------------------------------------------------------------
 // Repository operations
@@ -405,170 +396,7 @@ GhidraDbExport GhidraConnection::openDatabase(const std::string& repo,
             return {};
         }
 
-        GhidraDbExport out;
-        out.imageBase = parseHexAddr(resp.value("image_base", std::string{"0x0"}));
-
-        if (resp.contains("diag")) {
-            for (auto& d : resp["diag"])
-                out.diag.push_back(d.get<std::string>());
-        }
-
-        for (auto& j : resp["symbols"]) {
-            GhidraSymbol s;
-            s.key         = j.value("key",  int64_t{0});
-            s.name        = j.value("name", std::string{});
-            s.addr        = parseHexAddr(j.value("addr", std::string{"0x0"}));
-            s.type        = static_cast<GhidraSymbolType>(j.value("type",   0));
-            s.source      = static_cast<GhidraSymbolSource>(j.value("source", 0));
-            s.namespaceId = j.value("ns",   int64_t{0});
-            out.symbols.push_back(std::move(s));
-        }
-
-        for (auto& j : resp["comments"]) {
-            GhidraComment c;
-            c.addr       = parseHexAddr(j.value("addr", std::string{"0x0"}));
-            c.encodedKey = j.value("key",  std::string{});
-            c.eol        = j.value("eol",   std::string{});
-            c.pre   = j.value("pre",   std::string{});
-            c.post  = j.value("post",  std::string{});
-            c.plate = j.value("plate", std::string{});
-            c.rep   = j.value("rep",   std::string{});
-            out.comments.push_back(std::move(c));
-        }
-
-        for (auto& j : resp["func_flags"]) {
-            GhidraFuncFlags f;
-            f.key      = j.value("key",    int64_t{0});
-            f.thunk    = j.value("thunk",  false);
-            f.noReturn = j.value("no_ret", false);
-            f.isInline = j.value("inline", false);
-            out.funcFlags.push_back(f);
-
-            // NEW: signature fields
-            std::string cc      = j.value("cc",          std::string{});
-            std::string retType = j.value("ret_type",    std::string{});
-            int64_t retTypeId   = j.value("ret_type_id", int64_t{-1});
-            if (!cc.empty() || !retType.empty()) {
-                GhidraFuncSig sig;
-                sig.key               = f.key;
-                sig.callingConvention = cc;
-                sig.returnTypeName    = retType;
-                sig.returnTypeId      = retTypeId;
-                out.funcSigs.push_back(std::move(sig));
-            }
-        }
-
-        if (resp.contains("equates")) {
-            for (auto& j : resp["equates"]) {
-                GhidraEquate eq;
-                eq.id    = j.value("id",    int64_t{0});
-                eq.name  = j.value("name",  std::string{});
-                eq.value = j.value("value", int64_t{0});
-                if (j.contains("refs")) {
-                    for (auto& r : j["refs"]) {
-                        GhidraEquateRef ref;
-                        ref.addr    = parseHexAddr(r.value("addr",     std::string{"0x0"}));
-                        ref.opIndex = r.value("op_index", 0);
-                        eq.refs.push_back(std::move(ref));
-                    }
-                }
-                out.equates.push_back(std::move(eq));
-            }
-        }
-
-        if (resp.contains("bookmarks")) {
-            for (auto& j : resp["bookmarks"]) {
-                GhidraBookmark bm;
-                bm.type     = j.value("type",     std::string{});
-                bm.addr     = parseHexAddr(j.value("addr",     std::string{"0x0"}));
-                bm.category = j.value("category", std::string{});
-                bm.comment  = j.value("comment",  std::string{});
-                out.bookmarks.push_back(std::move(bm));
-            }
-        }
-
-        if (resp.contains("parameters")) {
-            for (auto& j : resp["parameters"]) {
-                GhidraParameter p;
-                p.key      = j.value("key",       int64_t{0});
-                p.funcAddr = parseHexAddr(j.value("func_addr", std::string{"0x0"}));
-                p.name     = j.value("name",      std::string{});
-                p.isParam  = j.value("is_param",  true);
-                p.ordinal  = j.value("ordinal",   0);
-                p.typeName = j.value("type_name", std::string{});
-                p.typeId   = j.value("type_id",   int64_t{-1});
-                out.parameters.push_back(std::move(p));
-            }
-        }
-
-        if (resp.contains("data_types")) {
-            for (auto& j : resp["data_types"]) {
-                GhidraDataType dt;
-                dt.id      = j.value("id",      int64_t{0});
-                dt.kind    = j.value("kind",    std::string{});
-                dt.name    = j.value("name",    std::string{});
-                dt.comment = j.value("comment", std::string{});
-                dt.size    = j.value("size",    0);
-                dt.underlyingTypeId = j.value("underlying_type_id", int64_t{0});
-                if (dt.kind == "typedef")
-                    dt.underlyingTypeName = j.value("underlying_name", std::string{});
-                if (j.contains("members")) {
-                    for (auto& m : j["members"]) {
-                        GhidraDataTypeMember mem;
-                        mem.offset   = m.value("offset",    0);
-                        mem.typeId   = m.value("type_id",  int64_t{0});
-                        mem.name     = m.value("name",     std::string{});
-                        mem.comment  = m.value("comment",  std::string{});
-                        mem.size     = m.value("size",     0);
-                        mem.ordinal  = m.value("ordinal",  0);
-                        mem.typeName = m.value("type_name",std::string{});
-                        dt.members.push_back(std::move(mem));
-                    }
-                }
-                if (j.contains("values")) {
-                    for (auto& v : j["values"]) {
-                        GhidraEnumValue ev;
-                        ev.name    = v.value("name",    std::string{});
-                        ev.value   = v.value("value",   int64_t{0});
-                        ev.comment = v.value("comment", std::string{});
-                        dt.values.push_back(std::move(ev));
-                    }
-                }
-                out.dataTypes.push_back(std::move(dt));
-            }
-        }
-
-        if (resp.contains("data_items")) {
-            for (auto& j : resp["data_items"]) {
-                GhidraDataItem item;
-                item.addr   = parseHexAddr(j.value("addr",    std::string{"0x0"}));
-                item.typeId = j.value("type_id", int64_t{0});
-                out.dataItems.push_back(std::move(item));
-            }
-        }
-
-        if (resp.contains("memory_blocks")) {
-            for (auto& j : resp["memory_blocks"]) {
-                GhidraMemoryBlock mb;
-                mb.name        = j.value("name", std::string{});
-                mb.addr        = parseHexAddr(j.value("addr", std::string{"0x0"}));
-                mb.size        = parseHexAddr(j.value("size", std::string{"0x0"}));
-                mb.read        = j.value("r", true);
-                mb.write       = j.value("w", false);
-                mb.execute     = j.value("x", false);
-                mb.initialized = j.value("initialized", true);
-                mb.overlay     = j.value("overlay", false);
-                out.memoryBlocks.push_back(std::move(mb));
-            }
-        }
-
-        if (resp.contains("xref_stats")) {
-            auto& xs = resp["xref_stats"];
-            out.xrefStats.fromCount = xs.value("from_count", 0);
-            out.xrefStats.toCount   = xs.value("to_count",   0);
-        }
-
-        return out;
+        return ghidra_json::parseDbExportJson(resp);
     } catch (const std::exception& e) {
         errorOut = e.what();
         return {};
@@ -781,11 +609,15 @@ void GhidraConnection::storeCheckinState(
     m_paramOriginalNameByKey.clear();
     m_paramOriginalTypeByKey.clear();
     m_paramKeyByAddrOrdinal.clear();
+    m_localKeyByAddrOffset.clear();
     m_newParamBaseline.clear();    // reset new-param tracking on fresh checkout
     m_newRegLocalBaseline.clear(); // reset new register-local tracking on fresh checkout
     for (const auto& p : parameters) {
         m_paramOriginalNameByKey[p.key] = p.name;
-        m_paramKeyByAddrOrdinal[p.funcAddr][(int)p.ordinal] = p.key;
+        if (p.isParam)
+            m_paramKeyByAddrOrdinal[p.funcAddr][(int)p.ordinal] = p.key;
+        else
+            m_localKeyByAddrOffset[p.funcAddr][(int)p.ordinal] = p.key;
         if (!p.typeName.empty())
             m_paramOriginalTypeByKey[p.key] = p.typeName;
     }
@@ -849,6 +681,7 @@ void GhidraConnection::clearCheckinState()
     m_paramOriginalNameByKey.clear();
     m_paramOriginalTypeByKey.clear();
     m_paramKeyByAddrOrdinal.clear();
+    m_localKeyByAddrOffset.clear();
     m_newParamBaseline.clear();
     m_newRegLocalBaseline.clear();
     m_ghidraBookmarkKeys.clear();
@@ -887,7 +720,81 @@ static bool isAutoGeneratedSymbolName(const std::string& n)
     if (n.rfind("off_", 0) == 0 && hexSuffix(4)) return true;
     if (n.rfind("unk_", 0) == 0 && hexSuffix(4)) return true;
     if (n.rfind("j_",   0) == 0 && hexSuffix(2)) return true;
+    // BN names a thunk after its target ("j_" + target name), so a thunk of
+    // an auto-named function ("j_sub_401000") is itself auto-generated.
+    if (n.rfind("j_", 0) == 0 && isAutoGeneratedSymbolName(n.substr(2)))
+        return true;
     return false;
+}
+
+/** Canonicalizes a type-name string so BN's rendering and Ghidra's name for
+ *  the same type compare equal. BN renders a 4-byte signed integer as
+ *  "int32_t" while Ghidra reports "int"; the Java bridge already folds the
+ *  two directions together when applying (ProgramApplier.STDINT_TO_GHIDRA),
+ *  but the check-in diff compared raw strings, perpetually re-flagging
+ *  every member/param whose spelling differs between the tools. Comparison
+ *  only — the original BN spelling is still what gets sent to the bridge. */
+static std::string canonicalTypeName(const std::string& raw)
+{
+    // Trim outer whitespace.
+    size_t b = raw.find_first_not_of(" \t");
+    if (b == std::string::npos) return {};
+    size_t e = raw.find_last_not_of(" \t");
+    std::string s = raw.substr(b, e - b + 1);
+
+    // Pointer: canonicalize the pointee, normalize to no space before '*'
+    // (Ghidra names pointers "Foo *", BN renders "Foo*").
+    if (s.back() == '*')
+        return canonicalTypeName(s.substr(0, s.size() - 1)) + "*";
+
+    // Array: canonicalize the element, keep the count spelling as-is.
+    if (s.back() == ']') {
+        size_t ob = s.rfind('[');
+        if (ob != std::string::npos)
+            return canonicalTypeName(s.substr(0, ob)) + s.substr(ob);
+    }
+
+    // Strip elaborated-type keywords and qualifiers BN prepends to named
+    // references ("struct Inner" vs Ghidra's "Inner").
+    for (bool stripped = true; stripped; ) {
+        stripped = false;
+        for (const char* kw : {"struct ", "union ", "enum ", "class ",
+                               "const ", "volatile "}) {
+            if (s.rfind(kw, 0) == 0) {
+                s.erase(0, std::string(kw).size());
+                stripped = true;
+            }
+        }
+    }
+
+    // Fold BN stdint spellings and Ghidra's storage aliases onto one
+    // canonical name per (width, signedness). Mirrors the Java bridge's
+    // STDINT_TO_GHIDRA map so "unchanged" here really means "the applier
+    // would write the identical type".
+    static const std::unordered_map<std::string, std::string> aliases = {
+        {"int8_t",   "sbyte"},    {"uint8_t",  "byte"},
+        {"int16_t",  "short"},    {"uint16_t", "ushort"},
+        {"int32_t",  "int"},      {"uint32_t", "uint"},
+        {"int64_t",  "longlong"}, {"uint64_t", "ulonglong"},
+        {"size_t",   "ulonglong"},{"ssize_t",  "longlong"},
+        {"intptr_t", "longlong"}, {"uintptr_t","ulonglong"},
+        // Ghidra's own aliases for the same storage (import maps these to
+        // plain BN integers, which render back as the stdint names above).
+        {"char", "sbyte"},  {"uchar", "byte"},
+        {"word", "ushort"}, {"dword", "uint"}, {"qword", "ulonglong"},
+        {"long", "int"},    {"ulong", "uint"},
+    };
+    auto it = aliases.find(s);
+    return (it != aliases.end()) ? it->second : s;
+}
+
+/** Canonicalizes a calling-convention name: Ghidra spells them "__cdecl",
+ *  BN spells them "cdecl". Leading underscores carry no meaning here. */
+static std::string canonicalCCName(const std::string& raw)
+{
+    size_t i = 0;
+    while (i < raw.size() && raw[i] == '_') ++i;
+    return raw.substr(i);
 }
 
 GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
@@ -964,10 +871,25 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
 
     // Collect data type changes: new types and modified types.
     // We compare BN's current type library against the Ghidra baseline captured at checkout.
+    //
+    // GetTypes() also returns the platform's type libraries (10k+ types on
+    // Windows platforms) and the single-member enums SyncEngine registers for
+    // equates. Only types the user created (user type container) or types
+    // from the Ghidra baseline take part in check-in — everything else would
+    // be queued as thousands of bogus "add" changes.
+    std::unordered_set<std::string> userTypeNames;
+    {
+        auto userTypes = view->GetUserTypeContainer().GetTypes();
+        if (userTypes)
+            for (auto& [typeId, namedType] : *userTypes)
+                userTypeNames.insert(namedType.first.GetString());
+    }
     auto bnTypes = view->GetTypes();
     for (auto& [qualName, bnType] : bnTypes) {
         std::string name = qualName.GetString();
         if (name.empty() || name.rfind("__", 0) == 0) continue;
+        if (!userTypeNames.count(name) && !m_ghidraTypesByName.count(name))
+            continue;
 
         BNTypeClass cls = bnType->GetClass();
         if (cls != StructureTypeClass && cls != EnumerationTypeClass &&
@@ -1023,9 +945,10 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
                 different = (change.members.size() != base.members.size());
                 if (!different) {
                     for (size_t i = 0; i < change.members.size() && !different; ++i)
-                        different = (change.members[i].name     != base.members[i].name     ||
-                                     change.members[i].offset   != base.members[i].offset   ||
-                                     change.members[i].typeName != base.members[i].typeName);
+                        different = (change.members[i].name   != base.members[i].name   ||
+                                     change.members[i].offset != base.members[i].offset ||
+                                     canonicalTypeName(change.members[i].typeName) !=
+                                     canonicalTypeName(base.members[i].typeName));
                 }
             } else if (cls == EnumerationTypeClass) {
                 different = (change.values.size() != base.values.size());
@@ -1035,7 +958,8 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
                                      change.values[i].value != base.values[i].value);
                 }
             } else { // typedef
-                different = (change.underlyingTypeName != base.underlyingTypeName);
+                different = (canonicalTypeName(change.underlyingTypeName) !=
+                             canonicalTypeName(base.underlyingTypeName));
             }
             if (different) {
                 change.op       = "update";
@@ -1080,15 +1004,20 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
         uint64_t bnAddr     = func->GetStart();
         uint64_t ghidraAddr = (uint64_t)((int64_t)bnAddr - rebase);
 
-        auto addrIt = m_paramKeyByAddrOrdinal.find(ghidraAddr);
-        if (addrIt == m_paramKeyByAddrOrdinal.end()) continue;
+        auto paramIt = m_paramKeyByAddrOrdinal.find(ghidraAddr);
+        auto localIt = m_localKeyByAddrOffset.find(ghidraAddr);
+        if (paramIt == m_paramKeyByAddrOrdinal.end() &&
+            localIt == m_localKeyByAddrOffset.end()) continue;
 
         // Helper lambda: compare one variable against its Ghidra baseline and
         // append to preview.paramRenames if name or type has changed.
-        auto checkVar = [&](const BinaryNinja::Variable& var, int ordinalKey,
+        // @p ordinals is the per-kind baseline (param index vs stack offset).
+        auto checkVar = [&](const std::unordered_map<int, int64_t>* ordinals,
+                            const BinaryNinja::Variable& var, int ordinalKey,
                             bool isAutoGen) {
-            auto ordIt = addrIt->second.find(ordinalKey);
-            if (ordIt == addrIt->second.end()) return;
+            if (!ordinals) return;
+            auto ordIt = ordinals->find(ordinalKey);
+            if (ordIt == ordinals->end()) return;
             int64_t key = ordIt->second;
 
             auto origIt = m_paramOriginalNameByKey.find(key);
@@ -1107,7 +1036,8 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
                 ? typeBaseIt->second : "";
 
             bool nameChanged = !curName.empty() && curName != origName && !isAutoGen;
-            bool typeChanged = !curTypeName.empty() && curTypeName != origTypeName;
+            bool typeChanged = !curTypeName.empty() &&
+                               canonicalTypeName(curTypeName) != canonicalTypeName(origTypeName);
 
             if (nameChanged || typeChanged) {
                 GhidraCheckinPreview::ParamRename pr;
@@ -1118,6 +1048,11 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
             }
         };
 
+        const std::unordered_map<int, int64_t>* paramOrdinals =
+            (paramIt != m_paramKeyByAddrOrdinal.end()) ? &paramIt->second : nullptr;
+        const std::unordered_map<int, int64_t>* localOffsets =
+            (localIt != m_localKeyByAddrOffset.end()) ? &localIt->second : nullptr;
+
         // --- Parameters (ordinal = index into parameter list) ---
         auto paramVars = func->GetParameterVariables().GetValue();
         for (size_t i = 0; i < paramVars.size(); ++i) {
@@ -1126,7 +1061,7 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
             bool autoGen = curName.empty() ||
                            curName.rfind("arg",    0) == 0 ||
                            curName.rfind("param_", 0) == 0;
-            checkVar(var, (int)i, autoGen);
+            checkVar(paramOrdinals, var, (int)i, autoGen);
         }
 
         // --- Local variables (ordinal = stack offset stored in Variable::storage) ---
@@ -1137,7 +1072,7 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
             bool autoGen = nat.name.empty() ||
                            nat.name.rfind("var_",   0) == 0 ||
                            nat.name.rfind("local_", 0) == 0;
-            checkVar(var, (int)var.storage, autoGen);
+            checkVar(localOffsets, var, (int)var.storage, autoGen);
         }
     }
 
@@ -1318,7 +1253,7 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
             // Calling convention
             auto bnCC = func->GetCallingConvention();
             std::string curCC = (bnCC.GetValue()) ? bnCC.GetValue()->GetName() : "";
-            if (!curCC.empty() && curCC != origCC)
+            if (!curCC.empty() && canonicalCCName(curCC) != canonicalCCName(origCC))
                 change.callingConvention = curCC;
 
             // Return type
@@ -1326,7 +1261,8 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
             if (retTypeIt != m_funcOriginalRetType.end()) {
                 auto bnRet = func->GetReturnType();
                 std::string curRetType = bnRet.GetValue() ? bnRet.GetValue()->GetString() : "";
-                if (!curRetType.empty() && curRetType != retTypeIt->second)
+                if (!curRetType.empty() &&
+                    canonicalTypeName(curRetType) != canonicalTypeName(retTypeIt->second))
                     change.returnTypeName = curRetType;
             }
 
@@ -1359,7 +1295,8 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
             if (bnCC.GetValue()) {
                 std::string curCC = bnCC.GetValue()->GetName();
                 auto origIt = m_funcOriginalCC.find(key);
-                if (origIt == m_funcOriginalCC.end() || curCC != origIt->second)
+                if (origIt == m_funcOriginalCC.end() ||
+                    canonicalCCName(curCC) != canonicalCCName(origIt->second))
                     change.callingConvention = curCC;
             }
 
@@ -1367,7 +1304,8 @@ GhidraCheckinPreview GhidraConnection::collectCheckinChanges(
             if (bnRet.GetValue()) {
                 std::string curRet = bnRet.GetValue()->GetString();
                 auto origIt = m_funcOriginalRetType.find(key);
-                if (origIt == m_funcOriginalRetType.end() || curRet != origIt->second)
+                if (origIt == m_funcOriginalRetType.end() ||
+                    canonicalTypeName(curRet) != canonicalTypeName(origIt->second))
                     change.returnTypeName = curRet;
             }
 
@@ -1476,157 +1414,25 @@ bool GhidraConnection::checkin(BinaryNinja::Ref<BinaryNinja::BinaryView> view,
     uint64_t bnBase    = view->GetStart();
     int64_t  rebase    = (int64_t)bnBase - (int64_t)m_imageBase;
 
-    nlohmann::json symbols = nlohmann::json::array();
-    for (const auto& r : preview.renames)
-        symbols.push_back({{"key", r.key}, {"name", r.newName}});
-    // New symbols: no Ghidra key — send VA so the bridge can find/create a record.
-    for (const auto& s : preview.newSymbols) {
-        uint64_t ghidraVa = (uint64_t)((int64_t)s.addr - rebase);
-        symbols.push_back({
-            {"va",       toHex(ghidraVa)},
-            {"name",     s.name},
-            {"sym_type", s.isFunction ? 5 : 0}  // 5=FUNCTION (new), 0=LABEL
-        });
-    }
-
-    nlohmann::json comments = nlohmann::json::array();
-    for (const auto& c : preview.comments) {
-        // Ghidra VA = BN addr − rebase.
-        uint64_t ghidraVa = (uint64_t)((int64_t)c.addr - rebase);
-        // Route to the correct Ghidra comment column:
-        //   • plate  — originated as a function-header comment (imported via func->SetComment)
-        //   • eol/pre/post/rep — whichever single column held the text originally;
-        //                        merged multi-column text defaults back to "eol"
-        nlohmann::json entry = {{"va", toHex(ghidraVa)}};
-        std::string field;
-        if (m_addrToOriginalFuncComment.count(c.addr)) {
-            field = "plate";
-        } else {
-            auto fIt = m_addrToCommentField.find(c.addr);
-            field = (fIt != m_addrToCommentField.end()) ? fIt->second : "eol";
-        }
-        entry[field] = c.text;
-        if (!c.encodedKey.empty())
-            entry["key"] = c.encodedKey;
-        comments.push_back(std::move(entry));
-    }
-
-    nlohmann::json equateRenames = nlohmann::json::array();
-    for (const auto& r : preview.equateRenames)
-        equateRenames.push_back({{"id", r.id}, {"name", r.name}});
-
-    nlohmann::json equateRefAdds = nlohmann::json::array();
-    for (const auto& r : preview.newEquateRefs) {
-        uint64_t ghidraVa = (uint64_t)((int64_t)r.addr - rebase);
-        equateRefAdds.push_back({
-            {"id",       r.equateId},
-            {"va",       toHex(ghidraVa)},
-            {"op_index", r.opIndex}
-        });
-    }
-
-    nlohmann::json bookmarkChanges = nlohmann::json::array();
-    for (const auto& b : preview.bookmarkChanges) {
-        uint64_t ghidraVa = (uint64_t)((int64_t)b.addr - (int64_t)(view->GetStart() - m_imageBase));
-        bookmarkChanges.push_back({
-            {"op",       b.op},
-            {"type",     b.type},
-            {"addr",     toHex(ghidraVa)},
-            {"category", b.category},
-            {"comment",  b.comment}
-        });
-    }
-
-    nlohmann::json paramRenames = nlohmann::json::array();
-    for (const auto& r : preview.paramRenames) {
-        nlohmann::json j = {{"key", r.key}, {"name", r.name}};
-        if (!r.typeName.empty()) j["type_name"] = r.typeName;
-        paramRenames.push_back(j);
-    }
-    // New params/reg-locals: no Ghidra key — send func_va + ordinal so the bridge can create a record.
-    for (const auto& p : preview.newParams) {
-        uint64_t ghidraVa = (uint64_t)((int64_t)p.funcAddr - rebase);
-        nlohmann::json j = {
-            {"func_va",  toHex(ghidraVa)},
-            {"ordinal",  p.ordinal},
-            {"name",     p.name},
-            {"is_local", p.isLocal}   // true → LOCAL_VAR (type=7), false → PARAMETER (type=6)
-        };
-        if (!p.typeName.empty()) j["type_name"] = p.typeName;
-        paramRenames.push_back(j);
-    }
-
-    nlohmann::json dataTypeChanges = nlohmann::json::array();
-    for (const auto& dt : preview.dataTypeChanges) {
-        nlohmann::json j;
-        j["op"]        = dt.op;
-        j["kind"]      = dt.kind;
-        j["name"]      = dt.name;
-        j["ghidra_id"] = dt.ghidraId;
-        j["size"]      = dt.size;
-        if (!dt.members.empty()) {
-            nlohmann::json members = nlohmann::json::array();
-            for (const auto& m : dt.members) {
-                members.push_back({{"name", m.name}, {"offset", m.offset},
-                                   {"size", m.size}, {"type_name", m.typeName}});
-            }
-            j["members"] = members;
-        }
-        if (!dt.values.empty()) {
-            nlohmann::json values = nlohmann::json::array();
-            for (const auto& v : dt.values) {
-                values.push_back({{"name", v.name}, {"value", v.value}});
-            }
-            j["values"] = values;
-        }
-        if (!dt.underlyingTypeName.empty())
-            j["underlying_type_name"] = dt.underlyingTypeName;
-        dataTypeChanges.push_back(j);
-    }
-
-    nlohmann::json dataItemChanges = nlohmann::json::array();
-    for (const auto& di : preview.dataItemChanges) {
-        // Convert BN VA → Ghidra VA before sending (same convention as bookmarks/comments).
-        uint64_t ghidraItemVa = (uint64_t)((int64_t)di.addr - rebase);
-        dataItemChanges.push_back({
-            {"op",        di.op},
-            {"addr",      toHex(ghidraItemVa)},
-            {"type_name", di.typeName}
-        });
-    }
-
-    nlohmann::json funcSigChanges = nlohmann::json::array();
-    for (const auto& fs : preview.funcSigChanges) {
-        nlohmann::json j;
-        j["key"] = fs.key;
-        if (!fs.callingConvention.empty()) j["cc"]       = fs.callingConvention;
-        if (!fs.returnTypeName.empty())     j["ret_type"] = fs.returnTypeName;
-        funcSigChanges.push_back(j);
-    }
+    nlohmann::json body = ghidra_json::buildCheckinJson(
+        preview, rebase, m_addrToOriginalFuncComment, m_addrToCommentField);
 
     BinaryNinja::LogInfo("ghidra-bridge: checkin %s — %d renamed, %d new syms, %d comments, %d equate renames, %d new eq refs, %d bookmarks, %d params, %d new params, %d datatypes, %d dataitems, %d funcsigs",
         m_checkinItem.c_str(), (int)preview.renames.size(), (int)preview.newSymbols.size(),
-        (int)comments.size(), (int)equateRenames.size(), (int)equateRefAdds.size(),
-        (int)bookmarkChanges.size(), (int)preview.paramRenames.size(), (int)preview.newParams.size(),
-        (int)dataTypeChanges.size(), (int)dataItemChanges.size(), (int)funcSigChanges.size());
+        (int)body["comments"].size(), (int)body["equate_renames"].size(), (int)body["equate_ref_adds"].size(),
+        (int)body["bookmark_changes"].size(), (int)preview.paramRenames.size(), (int)preview.newParams.size(),
+        (int)body["data_type_changes"].size(), (int)body["data_item_changes"].size(), (int)body["func_sig_changes"].size());
 
     try {
-        auto resp = m_client->sendSync({
-            {"op",                "checkin"},
-            {"repo",              m_checkinRepo},
-            {"folder",            m_checkinFolder},
-            {"item",              m_checkinItem},
-            {"comment",           comment},
-            {"symbols",           symbols},
-            {"comments",          comments},
-            {"equate_renames",    equateRenames},
-            {"equate_ref_adds",   equateRefAdds},
-            {"bookmark_changes",  bookmarkChanges},
-            {"param_renames",     paramRenames},
-            {"data_type_changes", dataTypeChanges},
-            {"data_item_changes", dataItemChanges},
-            {"func_sig_changes",  funcSigChanges}
-        }, /*timeoutMs=*/120'000);
+        nlohmann::json req = {
+            {"op",      "checkin"},
+            {"repo",    m_checkinRepo},
+            {"folder",  m_checkinFolder},
+            {"item",    m_checkinItem},
+            {"comment", comment}
+        };
+        req.update(body);
+        auto resp = m_client->sendSync(req, /*timeoutMs=*/120'000);
 
         if (!resp.value("ok", false)) {
             errorOut = resp.value("error", "checkin failed");
@@ -1677,9 +1483,13 @@ bool GhidraConnection::checkin(BinaryNinja::Ref<BinaryNinja::BinaryView> view,
             stored.members.clear();
             for (const auto& m : dt.members) {
                 GhidraDataTypeMember mem;
-                mem.name   = m.name;
-                mem.offset = m.offset;
-                mem.size   = m.size;
+                mem.name     = m.name;
+                mem.offset   = m.offset;
+                mem.size     = m.size;
+                // Keep the type name — the diff compares it, and dropping it
+                // here made every checked-in struct re-flag as modified on
+                // the next check-in ("int32_t" != "").
+                mem.typeName = m.typeName;
                 stored.members.push_back(mem);
             }
             stored.values.clear();

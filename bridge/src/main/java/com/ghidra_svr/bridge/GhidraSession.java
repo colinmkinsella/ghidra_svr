@@ -179,6 +179,8 @@ public class GhidraSession {
 
     public String getConnectedUser() { return connectedUser; }
     public boolean isConnected()     { return serverHandle != null; }
+    /** Package seam for the live-server E2E tests — the raw server handle. */
+    RemoteRepositoryServerHandle serverHandle() { return serverHandle; }
     public Set<String> getOpenRepos(){ return Collections.unmodifiableSet(openRepos.keySet()); }
 
     // -------------------------------------------------------------------------
