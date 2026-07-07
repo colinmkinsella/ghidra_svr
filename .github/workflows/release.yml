@@ -1,0 +1,124 @@
+# Release on push to main.
+#
+# Builds and tests the Java bridge (release is gated on green tests), then
+# publishes a GitHub release tagged v<version> — the version comes from
+# bridge/build.gradle, so cutting a new release = bump the version there and
+# push/merge to main. If that version is already released the workflow skips
+# publishing instead of failing, so routine pushes to main stay green.
+#
+# Assets:
+#   ghidra-bridge-<version>.jar          — the bridge (local mode / manual deploy)
+#   ghidra-bridge-server-package-*.zip   — server-package/ with the jar staged,
+#                                          ready to unzip next to a Ghidra Server
+#
+# The BN plugin itself (binja-ghidra.dll/.dylib/.so) cannot be built in CI —
+# linking needs the binaryninjaui library from a licensed Binary Ninja
+# install — so plugin binaries are built per-machine with build.bat/build.sh.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      # Keep in sync with .github/workflows/build.yml
+      GHIDRA_TAG: Ghidra_12.0.4_build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version and check for existing release
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -nE "s/^version *= *'([^']+)'.*/\1/p" bridge/build.gradle)
+          if [[ -z "$version" ]]; then
+            echo "could not read version from bridge/build.gradle"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version"    >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::Release v$version already exists — bump the version in bridge/build.gradle to cut a new release. Skipping."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v4
+        if: steps.ver.outputs.exists == 'false'
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Resolve pinned Ghidra release
+        if: steps.ver.outputs.exists == 'false'
+        id: ghidra
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url=$(gh api "repos/NationalSecurityAgency/ghidra/releases/tags/$GHIDRA_TAG" \
+                  --jq '[.assets[] | select(.name | endswith(".zip"))][0].browser_download_url')
+          echo "release: $GHIDRA_TAG ($url)"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Ghidra
+        if: steps.ver.outputs.exists == 'false'
+        id: ghidra-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ghidra
+          key: ghidra-${{ env.GHIDRA_TAG }}
+
+      - name: Download Ghidra
+        if: steps.ver.outputs.exists == 'false' && steps.ghidra-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/ghidra
+          curl -fsSL -o /tmp/ghidra.zip "${{ steps.ghidra.outputs.url }}"
+          unzip -q /tmp/ghidra.zip -d ~/ghidra
+          rm /tmp/ghidra.zip
+
+      - name: Build and test bridge
+        if: steps.ver.outputs.exists == 'false'
+        run: |
+          home=$(ls -d ~/ghidra/ghidra_*_PUBLIC | head -1)
+          chmod +x bridge/gradlew
+          bridge/gradlew -p bridge build -PghidraHome="$home" --console=plain
+
+      - name: Assemble server package
+        if: steps.ver.outputs.exists == 'false'
+        run: |
+          version="${{ steps.ver.outputs.version }}"
+          stage="ghidra-bridge-server-package-v$version"
+          mkdir -p "/tmp/$stage"
+          cp server-package/README.txt server-package/start-bridge.bat server-package/start-bridge.sh "/tmp/$stage/"
+          cp "bridge/build/libs/ghidra-bridge-$version.jar" "/tmp/$stage/"
+          (cd /tmp && zip -qr "$stage.zip" "$stage")
+          mv "/tmp/$stage.zip" .
+
+      - name: Create release
+        if: steps.ver.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.ver.outputs.version }}"
+          gh release create "v$version" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "binja-ghidra v$version" \
+            --generate-notes \
+            --notes "Bridge jar and server deployment package attached. The Binary Ninja plugin itself is built per-machine with \`build.bat install\` / \`./build.sh install\` (linking requires a licensed Binary Ninja install)." \
+            "bridge/build/libs/ghidra-bridge-$version.jar" \
+            "ghidra-bridge-server-package-v$version.zip"
