@@ -104,72 +104,89 @@ FetchContent_MakeAvailable(binaryninja-api)
 
 # ---------------------------------------------------------------------------
 # Plugin target
+#
+# Without a Binary Ninja installation (e.g. CI with -DBN_ALLOW_STUBS=ON) the
+# api defines binaryninjaui as a fake UTILITY target, which cannot be linked —
+# a configure-time error.  Skip the plugin target in that case; the test
+# targets below cover every non-Qt production source and still build.
 # ---------------------------------------------------------------------------
-add_library(binja-ghidra SHARED
-    src/plugin.cpp
-    src/BridgeProcess.cpp
-    src/BridgeClient.cpp
-    src/GhidraConnection.cpp
-    src/GhidraJson.cpp
-    src/SyncEngine.cpp
-    src/ui/ConnectDialog.cpp
-    src/ui/ProjectPanel.cpp
-    # Weak stubs for Enterprise/Collaboration API — satisfies the static linker
-    # when building against standard (non-Enterprise) Binary Ninja.
-    src/enterprise_stubs.cpp
-    # Headers with Q_OBJECT must be listed so AUTOMOC finds them.
-    include/ui/ConnectDialog.h
-    include/ui/ProjectPanel.h
-)
+set(_bn_ui_available FALSE)
+if(TARGET binaryninjaui)
+    get_target_property(_bn_ui_type binaryninjaui TYPE)
+    if(NOT _bn_ui_type STREQUAL "UTILITY")
+        set(_bn_ui_available TRUE)
+    endif()
+endif()
 
-target_include_directories(binja-ghidra PRIVATE
-    include
-    "${CMAKE_SOURCE_DIR}/../binaryninja-api/vendor"   # nlohmann/json.hpp
-)
+if(_bn_ui_available)
+    add_library(binja-ghidra SHARED
+        src/plugin.cpp
+        src/BridgeProcess.cpp
+        src/BridgeClient.cpp
+        src/GhidraConnection.cpp
+        src/GhidraJson.cpp
+        src/SyncEngine.cpp
+        src/ui/ConnectDialog.cpp
+        src/ui/ProjectPanel.cpp
+        # Weak stubs for Enterprise/Collaboration API — satisfies the static linker
+        # when building against standard (non-Enterprise) Binary Ninja.
+        src/enterprise_stubs.cpp
+        # Headers with Q_OBJECT must be listed so AUTOMOC finds them.
+        include/ui/ConnectDialog.h
+        include/ui/ProjectPanel.h
+    )
 
-# Bake the CMake-resolved Ghidra path as a compile-time fallback for local mode.
-# The runtime ghidra.ghidraHome setting or auto-detection overrides this.
-if(GHIDRA_HOME)
+    target_include_directories(binja-ghidra PRIVATE
+        include
+        "${CMAKE_SOURCE_DIR}/../binaryninja-api/vendor"   # nlohmann/json.hpp
+    )
+
+    # Bake the CMake-resolved Ghidra path as a compile-time fallback for local mode.
+    # The runtime ghidra.ghidraHome setting or auto-detection overrides this.
+    if(GHIDRA_HOME)
+        target_compile_definitions(binja-ghidra PRIVATE
+            GHIDRA_HOME_DEFAULT="${GHIDRA_HOME}")
+    endif()
+
+    target_link_libraries(binja-ghidra PRIVATE
+        binaryninjaui          # transitively pulls in binaryninjaapi + BN link dirs
+        Qt6::Widgets
+        Qt6::Core
+    )
+
+    if(WIN32)
+        target_link_libraries(binja-ghidra PRIVATE ws2_32)
+        set_target_properties(binja-ghidra PROPERTIES PREFIX "")
+    elseif(UNIX AND NOT APPLE)
+        target_link_libraries(binja-ghidra PRIVATE dl)
+    endif()
+
+    if(APPLE)
+        # Keep the build-time RPATHs in the installed dylib.
+        # BN loads plugins via dlopen from its own process, which already has the BN
+        # and Qt libs in its address space, so the RPATHs are effectively unused at
+        # load time — but removing them on every "cmake --install" run causes
+        # install_name_tool to error when the file is "Up-to-date" and the paths
+        # were already stripped on a previous install.  BUILD_WITH_INSTALL_RPATH
+        # tells CMake not to strip/rewrite RPATHs during install.
+        set_target_properties(binja-ghidra PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
+    endif()
+
     target_compile_definitions(binja-ghidra PRIVATE
-        GHIDRA_HOME_DEFAULT="${GHIDRA_HOME}")
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        _CRT_SECURE_NO_WARNINGS
+    )
+
+    # -----------------------------------------------------------------------
+    # Install — uses bn_install_plugin() helper defined by the api
+    # The bridge JAR is installed alongside the plugin for local mode.
+    # In remote mode it lives on the Ghidra server (see server/start-bridge.sh).
+    # -----------------------------------------------------------------------
+    bn_install_plugin(binja-ghidra)
+else()
+    message(STATUS "binja-ghidra: Binary Ninja UI not available — plugin target skipped (test targets still build)")
 endif()
-
-target_link_libraries(binja-ghidra PRIVATE
-    binaryninjaui          # transitively pulls in binaryninjaapi + BN link dirs
-    Qt6::Widgets
-    Qt6::Core
-)
-
-if(WIN32)
-    target_link_libraries(binja-ghidra PRIVATE ws2_32)
-    set_target_properties(binja-ghidra PROPERTIES PREFIX "")
-elseif(UNIX AND NOT APPLE)
-    target_link_libraries(binja-ghidra PRIVATE dl)
-endif()
-
-if(APPLE)
-    # Keep the build-time RPATHs in the installed dylib.
-    # BN loads plugins via dlopen from its own process, which already has the BN
-    # and Qt libs in its address space, so the RPATHs are effectively unused at
-    # load time — but removing them on every "cmake --install" run causes
-    # install_name_tool to error when the file is "Up-to-date" and the paths
-    # were already stripped on a previous install.  BUILD_WITH_INSTALL_RPATH
-    # tells CMake not to strip/rewrite RPATHs during install.
-    set_target_properties(binja-ghidra PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
-endif()
-
-target_compile_definitions(binja-ghidra PRIVATE
-    NOMINMAX
-    WIN32_LEAN_AND_MEAN
-    _CRT_SECURE_NO_WARNINGS
-)
-
-# ---------------------------------------------------------------------------
-# Install — uses bn_install_plugin() helper defined by the api
-# The bridge JAR is installed alongside the plugin for local mode.
-# In remote mode it lives on the Ghidra server (see server/start-bridge.sh).
-# ---------------------------------------------------------------------------
-bn_install_plugin(binja-ghidra)
 
 # ---------------------------------------------------------------------------
 # Tests (Google Test)

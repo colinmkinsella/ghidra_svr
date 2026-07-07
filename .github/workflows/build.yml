@@ -11,9 +11,11 @@
 #   run here — executing them needs a licensed headless core.
 #
 # bridge
-#   Builds the Java bridge jar against the latest public Ghidra release and
-#   runs the full unit-test suite (the live-server E2E tier is excluded by
-#   default). The jar is uploaded as an artifact.
+#   Builds the Java bridge jar against the pinned Ghidra release the project
+#   targets (newer Ghidra releases change server APIs, e.g. 12.1 removed
+#   GhidraServerHandle.INTERFACE_VERSION) and runs the full unit-test suite
+#   (the live-server E2E tier is excluded by default). The jar is uploaded
+#   as an artifact.
 
 name: build
 
@@ -94,6 +96,10 @@ jobs:
   bridge:
     name: bridge (java)
     runs-on: ubuntu-latest
+    env:
+      # The Ghidra release the bridge targets — keep in sync with what your
+      # Ghidra Server runs. Newer releases change server-side APIs.
+      GHIDRA_TAG: Ghidra_12.0.4_build
     steps:
       - uses: actions/checkout@v4
 
@@ -102,16 +108,14 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Resolve latest Ghidra release
+      - name: Resolve pinned Ghidra release
         id: ghidra
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag=$(gh api repos/NationalSecurityAgency/ghidra/releases/latest --jq .tag_name)
-          url=$(gh api repos/NationalSecurityAgency/ghidra/releases/latest \
+          url=$(gh api "repos/NationalSecurityAgency/ghidra/releases/tags/$GHIDRA_TAG" \
                   --jq '[.assets[] | select(.name | endswith(".zip"))][0].browser_download_url')
-          echo "release: $tag"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release: $GHIDRA_TAG ($url)"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
       - name: Cache Ghidra
@@ -119,7 +123,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/ghidra
-          key: ghidra-${{ steps.ghidra.outputs.tag }}
+          key: ghidra-${{ env.GHIDRA_TAG }}
 
       - name: Download Ghidra
         if: steps.ghidra-cache.outputs.cache-hit != 'true'
