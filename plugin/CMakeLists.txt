@@ -105,13 +105,29 @@ FetchContent_MakeAvailable(binaryninja-api)
 # ---------------------------------------------------------------------------
 # Plugin target
 #
-# Without a Binary Ninja installation (e.g. CI with -DBN_ALLOW_STUBS=ON) the
-# api defines binaryninjaui as a fake UTILITY target, which cannot be linked —
-# a configure-time error.  Skip the plugin target in that case; the test
-# targets below cover every non-Qt production source and still build.
+# Two link modes:
+#
+#  - Normal: a Binary Ninja install was found; link the real binaryninjaui
+#    (which transitively provides Qt link dirs and core).
+#
+#  - Stub (CI, no BN install — the Vector35/sample_plugin_cpp approach): the
+#    api's BN_ALLOW_STUBS already fools the linker for binaryninjacore; UI
+#    symbols are satisfied per platform instead of linking binaryninjaui:
+#      macOS  — '-undefined dynamic_lookup' (resolved inside BN at load time)
+#      Linux  — shared libs allow undefined symbols by default
+#      Windows— an import-lib stub generated from cmake/binaryninjaui_stub.def
+#               (regenerate with plugin/tools/gen-ui-stub-def.ps1 if the
+#               plugin starts using new UI symbols and the CI link fails)
+#    Qt is linked from a stock Qt of the same major.minor; at runtime the
+#    imports resolve to the Qt already loaded in the BN process.
+#
+# BN_FORCE_STUB_LINK=ON selects stub mode even when an install exists — used
+# by gen-ui-stub-def.ps1 and for testing the CI configuration locally.
 # ---------------------------------------------------------------------------
+option(BN_FORCE_STUB_LINK "Force the no-install stub link mode for the plugin target" OFF)
+
 set(_bn_ui_available FALSE)
-if(TARGET binaryninjaui)
+if(TARGET binaryninjaui AND NOT BN_FORCE_STUB_LINK)
     get_target_property(_bn_ui_type binaryninjaui TYPE)
     if(NOT _bn_ui_type STREQUAL "UTILITY")
         set(_bn_ui_available TRUE)
@@ -184,6 +200,74 @@ if(_bn_ui_available)
     # In remote mode it lives on the Ghidra server (see server/start-bridge.sh).
     # -----------------------------------------------------------------------
     bn_install_plugin(binja-ghidra)
+elseif(BN_ALLOW_STUBS OR BN_FORCE_STUB_LINK)
+    message(STATUS "binja-ghidra: stub link mode — UI symbols resolve inside Binary Ninja at load time")
+
+    add_library(binja-ghidra SHARED
+        src/plugin.cpp
+        src/BridgeProcess.cpp
+        src/BridgeClient.cpp
+        src/GhidraConnection.cpp
+        src/GhidraJson.cpp
+        src/SyncEngine.cpp
+        src/ui/ConnectDialog.cpp
+        src/ui/ProjectPanel.cpp
+        src/enterprise_stubs.cpp
+        include/ui/ConnectDialog.h
+        include/ui/ProjectPanel.h
+    )
+
+    target_include_directories(binja-ghidra PRIVATE
+        include
+        "${CMAKE_SOURCE_DIR}/../binaryninja-api/vendor"   # nlohmann/json.hpp
+        "${CMAKE_SOURCE_DIR}/../binaryninja-api/ui"       # UI headers (normally via binaryninjaui)
+    )
+
+    if(GHIDRA_HOME)
+        target_compile_definitions(binja-ghidra PRIVATE
+            GHIDRA_HOME_DEFAULT="${GHIDRA_HOME}")
+    endif()
+
+    target_link_libraries(binja-ghidra PRIVATE
+        binaryninjaapi
+        Qt6::Widgets
+        Qt6::Core
+    )
+
+    if(WIN32)
+        # MSVC needs an import library for every referenced DLL. Build a stub
+        # binaryninjaui.lib from the committed .def (symbol names only); the
+        # imports bind by DLL name, so they resolve to the real binaryninjaui
+        # loaded in the BN process.
+        set(_ui_def "${CMAKE_CURRENT_SOURCE_DIR}/cmake/binaryninjaui_stub.def")
+        if(NOT EXISTS "${_ui_def}")
+            message(FATAL_ERROR "Missing ${_ui_def} — run plugin/tools/gen-ui-stub-def.ps1 to generate it")
+        endif()
+        set(_ui_stub_lib "${CMAKE_CURRENT_BINARY_DIR}/binaryninjaui_stub/binaryninjaui.lib")
+        add_custom_command(
+            OUTPUT "${_ui_stub_lib}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/binaryninjaui_stub"
+            COMMAND lib /nologo /def:"${_ui_def}" /machine:x64 /out:"${_ui_stub_lib}"
+            DEPENDS "${_ui_def}"
+            COMMENT "Generating stub binaryninjaui import library")
+        add_custom_target(binaryninjaui-stub-lib DEPENDS "${_ui_stub_lib}")
+        add_dependencies(binja-ghidra binaryninjaui-stub-lib)
+        target_link_libraries(binja-ghidra PRIVATE "${_ui_stub_lib}" ws2_32)
+        set_target_properties(binja-ghidra PROPERTIES PREFIX "")
+    elseif(APPLE)
+        # UI (and any other) symbols resolve dynamically inside the BN process.
+        target_link_options(binja-ghidra PRIVATE "LINKER:-undefined,dynamic_lookup")
+        set_target_properties(binja-ghidra PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
+    else()
+        # Linux shared libraries allow undefined symbols by default.
+        target_link_libraries(binja-ghidra PRIVATE dl)
+    endif()
+
+    target_compile_definitions(binja-ghidra PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        _CRT_SECURE_NO_WARNINGS
+    )
 else()
     message(STATUS "binja-ghidra: Binary Ninja UI not available — plugin target skipped (test targets still build)")
 endif()

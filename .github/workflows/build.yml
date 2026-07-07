@@ -2,13 +2,15 @@
 #
 # plugin (matrix: stable/dev x windows/linux/macos)
 #   Resolves the latest binaryninja-api commit for the channel exactly like
-#   build.bat / build.sh (--channel), then compiles all non-Qt plugin sources
-#   (including enterprise_stubs.cpp, the ABI-drift canary) against that API.
-#   CI runners have no Binary Ninja install or license, so the build links
-#   against the API's generated core stubs (-DBN_ALLOW_STUBS=ON) and builds
-#   the two test targets, which cover every production source except the Qt
-#   UI (binaryninjaui only exists inside a real BN install). Tests are NOT
-#   run here — executing them needs a licensed headless core.
+#   build.bat / build.sh (--channel), then builds the full plugin plus the
+#   two test targets WITHOUT a Binary Ninja install or license — the
+#   Vector35/sample_plugin_cpp approach: the API's -DBN_ALLOW_STUBS=ON
+#   generates a stub binaryninjacore to fool the linker, UI symbols come
+#   from a generated import-lib stub on Windows / dynamic lookup on
+#   macOS+Linux, and everything resolves against the real libraries inside
+#   the Binary Ninja process at load time. Qt must not be NEWER than what
+#   BN ships (6.10.x) or the plugin's Qt imports won't resolve at load.
+#   Tests are compiled but NOT run — executing them needs a licensed core.
 #
 # bridge
 #   Builds the Java bridge jar against the pinned Ghidra release the project
@@ -65,8 +67,6 @@ jobs:
           echo "binaryninja-api ${{ matrix.channel }} commit: $sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
-      # Qt is only needed to get past the find_package(Qt6) gate in
-      # plugin/CMakeLists.txt — the targets built below do not link Qt.
       - name: Install Qt 6
         uses: jurplel/install-qt-action@v4
         with:
@@ -78,6 +78,11 @@ jobs:
         run: |
           # Dummy GHIDRA_HOME skips FetchGhidra's ~400 MB configure-time
           # download; it is only baked in as a local-mode fallback path.
+          # Universal macOS binary so both Intel and Apple Silicon BN load it.
+          extra=""
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            extra="-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+          fi
           mkdir -p "$RUNNER_TEMP/ghidra-none"
           cmake -B plugin/build -S plugin \
             -DCMAKE_BUILD_TYPE=Release \
@@ -85,13 +90,26 @@ jobs:
             -DBN_ALLOW_STUBS=ON \
             -DGHIDRA_HOME="$RUNNER_TEMP/ghidra-none" \
             -DQt6_DIR="$QT_ROOT_DIR/lib/cmake/Qt6" \
-            -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST
+            -DCMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE=PRE_TEST \
+            $extra
 
       - name: Build against ${{ matrix.channel }} API
         shell: bash
         run: |
           cmake --build plugin/build --config Release \
+            --target binja-ghidra \
             --target binja-ghidra-tests --target binja-ghidra-bn-tests
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: binja-ghidra-${{ matrix.channel }}-${{ matrix.os }}
+          path: |
+            plugin/build/binja-ghidra.dll
+            plugin/build/Release/binja-ghidra.dll
+            plugin/build/libbinja-ghidra.dylib
+            plugin/build/libbinja-ghidra.so
+          if-no-files-found: error
 
   bridge:
     name: bridge (java)

@@ -2,6 +2,7 @@
 bridge/build/
 bridge/bin/
 plugin/build/
+plugin/build-stub/
 plugin/*.log
 
 # Gradle
